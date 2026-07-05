@@ -17,6 +17,13 @@ from .gluetun import build_gluetun, parse_forwarded_port
 log = logging.getLogger("watchguard")
 
 
+def _short_id(ref: str) -> str:
+    """Shorten a full 64-hex container id to Docker's 12-char short form."""
+    if len(ref) == 64 and all(c in "0123456789abcdef" for c in ref):
+        return ref[:12]
+    return ref
+
+
 class Watchdog:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -108,7 +115,12 @@ class Watchdog:
             return None
         port = parse_forwarded_port(data.decode("utf-8", "replace"))
         if port is not None:
-            log.debug("forwarded port %d read from %s:%s via the docker socket", port, target, path)
+            log.debug(
+                "forwarded port %d read from %s:%s via the docker socket",
+                port,
+                _short_id(target),
+                path,
+            )
         return port
 
     def check_health(self) -> None:

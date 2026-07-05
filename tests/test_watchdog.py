@@ -2,7 +2,7 @@ from gluetun_watchguard.config import Config
 from gluetun_watchguard.connectivity import OutboundProbe
 from gluetun_watchguard.debounce import FailureTracker
 from gluetun_watchguard.gluetun import UNKNOWN
-from gluetun_watchguard.watchdog import Watchdog
+from gluetun_watchguard.watchdog import Watchdog, _short_id
 
 
 class FakeGluetun:
@@ -252,6 +252,15 @@ def test_wanted_port_prefers_local_file_over_socket(tmp_path):
     wd = make_watchdog(cfg=cfg, gluetun=FakeGluetun(port=6881), docker=d)
     assert wd._wanted_port() == 6881
     assert d.read_calls == []
+
+
+def test_short_id_shortens_full_container_id():
+    assert _short_id("d" * 64) == "d" * 12
+
+
+def test_short_id_keeps_names_and_short_refs():
+    assert _short_id("gluetun") == "gluetun"
+    assert _short_id("myproject-gluetun-1") == "myproject-gluetun-1"
 
 
 def test_wanted_port_api_only_when_no_file():
