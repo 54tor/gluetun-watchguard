@@ -98,7 +98,10 @@ class Watchdog:
         if state == HEALTH_UNKNOWN:
             # Slow or unreachable control server: draw no conclusion. Record
             # neither success nor failure so latency alone can never act.
-            log.warning("tunnel health unknown (control server slow/unreachable); not acting")
+            log.warning(
+                "tunnel health unknown (control server unreachable, slow or unauthorized); "
+                "not acting"
+            )
             return
         self.tunnel_tracker.record_failure()
         log.warning(
