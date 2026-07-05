@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gluetun-watchguard"
+version = "0.1.0"
+description = "Port-sync and tunnel watchdog for gluetun + qBittorrent/Transmission/ruTorrent stacks"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Sat0r" }]
+keywords = ["gluetun", "vpn", "qbittorrent", "transmission", "rutorrent", "port-forwarding", "watchdog"]
+dependencies = ["requests>=2.31,<3"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+gluetun-watchguard = "gluetun_watchguard.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/sat0r/gluetun-watchguard"
+Source = "https://github.com/sat0r/gluetun-watchguard"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
