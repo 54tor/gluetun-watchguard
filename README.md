@@ -194,6 +194,71 @@ Docker daemon. To reduce exposure:
 - Or set `DOCKER_ACTION=none` / `ENABLE_DOCKER_ACTION=false` to run in
   observe-and-port-sync mode only, and handle tunnel recovery yourself.
 
+## Troubleshooting
+
+### `Failed to resolve 'gluetun'` / name-resolution errors
+
+```
+watchguard.gluetun: gluetun GET /v1/... failed: ... Failed to resolve 'gluetun'
+```
+
+`watchguard` can't resolve the `gluetun` hostname, so it reaches neither the
+control server, the HTTP proxy, nor the client. (It correctly reports health as
+*unknown* and does **not** restart anything in this state.)
+
+Docker's built-in DNS only resolves a service name when the containers share a
+**user-defined network**. Run `watchguard` as its own container **on the same
+network as gluetun** — not with `network_mode: "service:gluetun"`, otherwise a
+gluetun restart would take the watchdog's own network down with it.
+
+- **Same compose file?** Services share the default network automatically — just
+  make sure the gluetun service is really named `gluetun` and that `watchguard`
+  has no `network_mode`.
+- **Different compose project / `docker run`?** Attach `watchguard` to gluetun's
+  network explicitly:
+
+  ```yaml
+  services:
+    watchguard:
+      networks: [gluetun_net]
+  networks:
+    gluetun_net:
+      external: true
+      name: <gluetun's network, from `docker network ls`>
+  ```
+
+- Verify from inside the container (empty output ⇒ wrong network):
+
+  ```bash
+  docker exec gluetun-watchguard getent hosts gluetun
+  ```
+
+- Or bypass names entirely and point the URLs at the right host:
+  `GLUETUN_CONTROL_URL`, `CLIENT_URL`, `GLUETUN_HTTP_PROXY`.
+
+### Control server returns 401 / 403
+
+gluetun v3.40+ requires authentication on its control server. Grant watchguard
+the two routes it reads, e.g. in gluetun's `/gluetun/auth/config.toml`:
+
+```toml
+[[roles]]
+name = "watchguard"
+routes = ["GET /v1/openvpn/portforwarded", "GET /v1/publicip/ip"]
+auth = "apikey"
+apikey = "change-me"
+```
+
+then set `GLUETUN_API_KEY=change-me` on watchguard (or use `auth = "none"` for
+those routes to skip the key). Basic auth is also supported via
+`GLUETUN_AUTH_USERNAME` / `GLUETUN_AUTH_PASSWORD`.
+
+### `target container unresolved` when using `GLUETUN_SERVICE`
+
+Compose-service resolution needs the Docker API to allow `GET /containers/json`
+and `/containers/{id}/json`, and project auto-detection only works in-container —
+set `COMPOSE_PROJECT` for host/dev runs. See *Targeting the gluetun container*.
+
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for local development, testing, and
