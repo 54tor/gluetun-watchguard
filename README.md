@@ -146,9 +146,12 @@ name/id. Two ways to point at it:
   same compose project, it auto-detects the project from its own container and
   resolves the service to a container via compose labels. This survives
   `compose up` recreating gluetun with a new generated name (e.g.
-  `myproject-gluetun-1`). Override auto-detection with `COMPOSE_PROJECT` if your
-  container uses a custom hostname. Requires the Docker API to allow
-  `GET /containers/json` and `/containers/{id}/json` (mind your socket-proxy).
+  `myproject-gluetun-1`). Auto-detection reads *this* container's own labels, so
+  it only works when `watchguard` itself runs as a container in the project — set
+  `COMPOSE_PROJECT` explicitly when running outside a container (e.g. local
+  `make run`) or when the container uses a custom `hostname:`. Service resolution
+  also needs the Docker API to allow `GET /containers/json` and
+  `/containers/{id}/json` (mind your socket-proxy).
 
 ## Security notes
 
@@ -157,7 +160,8 @@ The recovery action requires access to the Docker socket, which is a
 Docker daemon. To reduce exposure:
 
 - Put a **docker-socket-proxy** in front of the socket, allow only the container
-  `restart`/`stop` calls, and point `DOCKER_SOCKET` at the proxy.
+  `restart`/`stop` calls (plus `GET /containers/json` and `/containers/{id}/json`
+  if you use `GLUETUN_SERVICE` resolution), and point `DOCKER_SOCKET` at the proxy.
 - Or set `DOCKER_ACTION=none` / `ENABLE_DOCKER_ACTION=false` to run in
   observe-and-port-sync mode only, and handle tunnel recovery yourself.
 
