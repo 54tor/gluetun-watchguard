@@ -91,6 +91,10 @@ cooldown and can never chain into a double restart.
 (`DockerSocket.resolve_compose_service`, project auto-detected from our own
 container's labels or `COMPOSE_PROJECT`) → the literal `gluetun`. A `None` result
 aborts the recovery with an error rather than acting on the wrong container.
+Self-detection reads our own container via `hostname`, so it only works
+in-container; `COMPOSE_PROJECT` is required for host/dev runs or a custom
+`hostname:`. Resolution also needs read access to `GET /containers/json` and
+`/containers/{id}/json` on the socket/proxy.
 Resolving by service label is intentional: it survives `compose up` recreating
 gluetun with a new generated name.
 
