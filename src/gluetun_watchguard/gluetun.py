@@ -39,9 +39,11 @@ class GluetunControl:
         username: str = "",
         password: str = "",
         timeout: int = 10,
+        port_file: str = "",
     ) -> None:
         self._base = base_url.rstrip("/")
         self._timeout = timeout
+        self._port_file = port_file
         self._session = requests.Session()
         if api_key:
             self._session.headers["X-API-Key"] = api_key
@@ -63,7 +65,14 @@ class GluetunControl:
             return UNKNOWN
 
     def forwarded_port(self) -> int | None:
-        """Return the VPN-forwarded port, or None if not available yet."""
+        """Return the VPN-forwarded port, or None if not available yet.
+
+        When ``port_file`` is set, read it directly (a plain ``cat`` of gluetun's
+        ``VPN_PORT_FORWARDING_STATUS_FILE``, shared as a volume) and never touch
+        the control API — so port sync needs no control-server auth.
+        """
+        if self._port_file:
+            return self._read_port_file()
         data = self._get("/v1/openvpn/portforwarded")
         if data is UNKNOWN or not data:
             return None
@@ -71,6 +80,20 @@ class GluetunControl:
         if isinstance(port, int) and port > 0:
             return port
         return None
+
+    def _read_port_file(self) -> int | None:
+        try:
+            with open(self._port_file) as handle:
+                text = handle.read().strip()
+        except OSError as exc:
+            log.debug("gluetun port file %s unreadable: %s", self._port_file, exc)
+            return None
+        try:
+            port = int(text)
+        except ValueError:
+            log.debug("gluetun port file %s has no valid port: %r", self._port_file, text[:40])
+            return None
+        return port if port > 0 else None
 
     def public_ip(self) -> str | _Unknown | None:
         """Return gluetun's public IP, tri-state.
@@ -96,4 +119,5 @@ def build_gluetun(cfg) -> GluetunControl:
         username=cfg.gluetun_username,
         password=cfg.gluetun_password,
         timeout=cfg.http_timeout,
+        port_file=cfg.gluetun_port_file,
     )

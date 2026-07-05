@@ -135,6 +135,7 @@ All configuration is via environment variables.
 | `ENABLE_DOCKER_ACTION`  | `true`                        | Allow the recovery action to touch the Docker socket.      |
 | `GLUETUN_CONTROL_URL`   | `http://gluetun:8000`         | gluetun control-server base URL.                           |
 | `GLUETUN_HTTP_PROXY`    | _(empty)_                     | gluetun HTTP proxy (`HTTPPROXY=on`) for the egress probe.  |
+| `GLUETUN_PORT_FILE`     | _(empty)_                     | Read the forwarded port from this file instead of the API. |
 | `GLUETUN_API_KEY`       | _(empty)_                     | `X-API-Key` header, if the control server requires auth.   |
 | `GLUETUN_AUTH_USERNAME` | _(empty)_                     | HTTP basic-auth user for the control server (alternative). |
 | `GLUETUN_AUTH_PASSWORD` | _(empty)_                     | HTTP basic-auth password.                                  |
@@ -161,6 +162,30 @@ control server (port `8000`). Ensure it is enabled and reachable on your
 Docker network. Recent gluetun versions may require authentication for the
 control API — if so, set `GLUETUN_API_KEY` (or the basic-auth pair) to match
 your gluetun control-server configuration.
+
+### Forwarded port without the control server
+
+To skip control-server auth entirely for port sync, point `GLUETUN_PORT_FILE` at
+gluetun's forwarded-port status file (`VPN_PORT_FORWARDING_STATUS_FILE`, default
+`/tmp/gluetun/forwarded_port`) shared as a volume. When set, watchguard just
+reads (`cat`) the port from that file and never calls the control API for it.
+Combined with `GLUETUN_HTTP_PROXY` for the health probe, the whole stack then
+runs without any control-server authentication.
+
+```yaml
+services:
+  gluetun:
+    volumes:
+      - gluetun_status:/tmp/gluetun
+  watchguard:
+    volumes:
+      - gluetun_status:/tmp/gluetun:ro
+    environment:
+      - GLUETUN_PORT_FILE=/tmp/gluetun/forwarded_port
+      - GLUETUN_HTTP_PROXY=http://gluetun:8888
+volumes:
+  gluetun_status:
+```
 
 ### Targeting the gluetun container
 

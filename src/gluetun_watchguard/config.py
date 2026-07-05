@@ -50,6 +50,7 @@ class Config:
     gluetun_username: str = ""
     gluetun_password: str = ""
     gluetun_http_proxy: str = ""  # gluetun HTTP proxy (HTTPPROXY=on), e.g. http://gluetun:8888
+    gluetun_port_file: str = ""  # read the forwarded port from this file instead of the API
 
     # --- Torrent client ---
     client_kind: str = "qbittorrent"
@@ -98,6 +99,7 @@ class Config:
             gluetun_username=_env_str("GLUETUN_AUTH_USERNAME"),
             gluetun_password=_env_str("GLUETUN_AUTH_PASSWORD"),
             gluetun_http_proxy=_env_str("GLUETUN_HTTP_PROXY"),
+            gluetun_port_file=_env_str("GLUETUN_PORT_FILE"),
             client_kind=client_kind,
             client_url=_env_str("CLIENT_URL", "http://gluetun:8080").rstrip("/"),
             client_username=_env_str("CLIENT_USERNAME"),

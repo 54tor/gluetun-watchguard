@@ -57,7 +57,7 @@ Modules (`src/gluetun_watchguard/`):
 |-----------------|--------------------------------------------------------------|
 | `config.py`     | `Config` dataclass; parses & validates env vars              |
 | `log.py`        | stdout logging setup                                          |
-| `gluetun.py`    | gluetun control-server client (`forwarded_port`, `public_ip`)|
+| `gluetun.py`    | gluetun client: `forwarded_port` (API or `GLUETUN_PORT_FILE`), `public_ip` |
 | `connectivity.py`| `OutboundProbe` — egress test via gluetun HTTP proxy, public-IP fallback |
 | `dockerctl.py`  | stdlib unix-socket Docker client (`restart`/`stop` + compose resolution) |
 | `debounce.py`   | `FailureTracker` — the anti-flap state machine               |
