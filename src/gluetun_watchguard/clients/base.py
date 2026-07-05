@@ -28,6 +28,14 @@ class TorrentClient(ABC):
         """
         return None
 
+    def port_is_open(self) -> bool | None:
+        """Whether the incoming/forwarded port is actually reachable from outside.
+
+        Returns ``True``/``False`` when the client can tell, or ``None`` when it
+        is unknown/unsupported (callers must not draw any conclusion then).
+        """
+        return None
+
 
 def build_client(cfg) -> TorrentClient:
     # Imported lazily to keep optional per-client deps out of the hot path.

@@ -93,3 +93,18 @@ class QbittorrentClient(TorrentClient):
         # "connected" and "firewalled" both mean the network layer is up
         # (firewalled = reachable but no inbound port, not a tunnel failure).
         return True
+
+    def port_is_open(self) -> bool | None:
+        resp = self._api("GET", "/api/v2/transfer/info")
+        if resp is None:
+            return None
+        try:
+            status = resp.json().get("connection_status")
+        except ValueError:
+            return None
+        if status == "connected":
+            return True
+        if status == "firewalled":
+            # Reachable but no inbound: the forwarded port is not open.
+            return False
+        return None  # disconnected / unknown: can't conclude on the port

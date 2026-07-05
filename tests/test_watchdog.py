@@ -18,9 +18,10 @@ class FakeGluetun:
 
 
 class FakeClient:
-    def __init__(self, port=6881, conn=None):
+    def __init__(self, port=6881, conn=None, open=None):
         self.port = port
         self.conn = conn
+        self.open = open
         self.set_calls = []
 
     def get_listen_port(self):
@@ -34,10 +35,15 @@ class FakeClient:
     def connection_ok(self):
         return self.conn
 
+    def port_is_open(self):
+        return self.open
+
 
 class FakeDocker:
-    def __init__(self):
+    def __init__(self, resolved="proj-gluetun-1"):
         self.restarts = []
+        self.resolved = resolved
+        self.resolve_calls = []
 
     def restart(self, container, **_):
         self.restarts.append(container)
@@ -47,6 +53,10 @@ class FakeDocker:
         self.restarts.append(container)
         return True
 
+    def resolve_compose_service(self, service, project=None):
+        self.resolve_calls.append((service, project))
+        return self.resolved
+
 
 def make_watchdog(cfg=None, gluetun=None, client=None, docker=None):
     cfg = cfg or Config(startup_grace=0, failure_threshold=2, restart_cooldown=0)
@@ -54,7 +64,12 @@ def make_watchdog(cfg=None, gluetun=None, client=None, docker=None):
     wd.gluetun = gluetun or FakeGluetun()
     wd.client = client or FakeClient()
     wd.docker = docker or FakeDocker()
-    wd.tracker = FailureTracker(cfg.failure_threshold, cfg.restart_cooldown, cfg.startup_grace)
+    wd.tunnel_tracker = FailureTracker(
+        cfg.failure_threshold, cfg.restart_cooldown, cfg.startup_grace
+    )
+    wd.port_tracker = FailureTracker(
+        cfg.failure_threshold, cfg.restart_cooldown, cfg.startup_grace
+    )
     return wd
 
 
@@ -110,3 +125,94 @@ def test_no_restart_when_action_disabled():
     )
     wd.check_health()
     assert d.restarts == []
+
+
+def test_port_check_warns_but_never_acts_when_recovery_disabled():
+    cfg = Config(
+        startup_grace=0, failure_threshold=1, restart_cooldown=0, port_check_recovery=False
+    )
+    d = FakeDocker()
+    wd = make_watchdog(cfg=cfg, client=FakeClient(open=False), docker=d)
+    wd.check_port()
+    assert d.restarts == []
+
+
+def test_port_check_recovers_when_enabled_and_sustained():
+    cfg = Config(
+        startup_grace=0,
+        failure_threshold=2,
+        restart_cooldown=0,
+        port_check_recovery=True,
+        gluetun_container="gluetun",
+    )
+    d = FakeDocker()
+    wd = make_watchdog(cfg=cfg, client=FakeClient(open=False), docker=d)
+    wd.check_port()  # closed 1/2
+    assert d.restarts == []
+    wd.check_port()  # closed 2/2 -> act
+    assert d.restarts == ["gluetun"]
+
+
+def test_port_check_noop_when_client_cannot_tell():
+    cfg = Config(startup_grace=0, failure_threshold=1, restart_cooldown=0, port_check_recovery=True)
+    d = FakeDocker()
+    wd = make_watchdog(cfg=cfg, client=FakeClient(open=None), docker=d)
+    wd.check_port()
+    assert d.restarts == []
+
+
+def test_resolve_target_prefers_explicit_container():
+    cfg = Config(gluetun_container="gluetun", gluetun_service="svc")
+    wd = make_watchdog(cfg=cfg, docker=FakeDocker())
+    assert wd._resolve_target() == "gluetun"
+    assert wd.docker.resolve_calls == []  # never touched the API
+
+
+def test_resolve_target_uses_compose_service():
+    cfg = Config(gluetun_container="", gluetun_service="gluetun", compose_project="proj")
+    d = FakeDocker(resolved="proj-gluetun-1")
+    wd = make_watchdog(cfg=cfg, docker=d)
+    assert wd._resolve_target() == "proj-gluetun-1"
+    assert d.resolve_calls == [("gluetun", "proj")]
+
+
+def test_resolve_target_falls_back_to_default_name():
+    wd = make_watchdog(cfg=Config(), docker=FakeDocker())
+    assert wd._resolve_target() == "gluetun"
+
+
+def test_recover_aborts_when_service_unresolved():
+    cfg = Config(
+        gluetun_container="",
+        gluetun_service="gluetun",
+        startup_grace=0,
+        failure_threshold=1,
+        restart_cooldown=0,
+    )
+    d = FakeDocker(resolved=None)  # resolution fails
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip=None), client=FakeClient(conn=False), docker=d
+    )
+    wd.check_health()  # tunnel down -> recovery attempted -> resolve fails -> no restart
+    assert d.restarts == []
+
+
+def test_shared_cooldown_prevents_double_restart():
+    cfg = Config(
+        startup_grace=0,
+        failure_threshold=1,
+        restart_cooldown=999,
+        port_check_recovery=True,
+        gluetun_container="gluetun",
+    )
+    d = FakeDocker()
+    wd = make_watchdog(
+        cfg=cfg,
+        gluetun=FakeGluetun(ip=None),
+        client=FakeClient(conn=False, open=False),
+        docker=d,
+    )
+    wd.check_health()  # tunnel down -> restart
+    assert d.restarts == ["gluetun"]
+    wd.check_port()  # port closed too, but shared cooldown blocks a second restart
+    assert d.restarts == ["gluetun"]

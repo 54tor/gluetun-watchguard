@@ -27,7 +27,12 @@ class Watchdog:
         )
         self.client = build_client(cfg)
         self.docker = DockerSocket(cfg.docker_socket, timeout=max(30, cfg.http_timeout))
-        self.tracker = FailureTracker(
+        # One gate per failure mode; both share the cooldown via _recover() so a
+        # single restart never chains into a second one.
+        self.tunnel_tracker = FailureTracker(
+            cfg.failure_threshold, cfg.restart_cooldown, cfg.startup_grace
+        )
+        self.port_tracker = FailureTracker(
             cfg.failure_threshold, cfg.restart_cooldown, cfg.startup_grace
         )
         self._stop = threading.Event()
@@ -36,10 +41,13 @@ class Watchdog:
     def run(self) -> None:
         self._install_signal_handlers()
         log.info(
-            "watching: client=%s port_sync=%s healthcheck=%s docker_action=%s(%s) interval=%ss",
+            "watching: client=%s port_sync=%s healthcheck=%s port_check=%s(recovery=%s) "
+            "docker_action=%s(%s) interval=%ss",
             self.cfg.client_kind,
             self.cfg.enable_port_sync,
             self.cfg.enable_healthcheck,
+            self.cfg.enable_port_check,
+            self.cfg.port_check_recovery,
             self.cfg.enable_docker_action,
             self.cfg.docker_action,
             self.cfg.check_interval,
@@ -65,6 +73,8 @@ class Watchdog:
             self.sync_port()
         if self.cfg.enable_healthcheck:
             self.check_health()
+        if self.cfg.enable_port_check:
+            self.check_port()
 
     def sync_port(self) -> None:
         wanted = self.gluetun.forwarded_port()
@@ -84,18 +94,43 @@ class Watchdog:
 
     def check_health(self) -> None:
         if self.assess_health():
-            if self.tracker.consecutive:
+            if self.tunnel_tracker.consecutive:
                 log.info("tunnel health recovered")
-            self.tracker.record_success()
+            self.tunnel_tracker.record_success()
             return
-        self.tracker.record_failure()
+        self.tunnel_tracker.record_failure()
         log.warning(
             "tunnel health check failed (%d/%d)",
-            self.tracker.consecutive,
-            self.tracker.threshold,
+            self.tunnel_tracker.consecutive,
+            self.tunnel_tracker.threshold,
         )
-        if self.tracker.should_act():
-            self.act()
+        if self.tunnel_tracker.should_act():
+            self._recover("tun interface down")
+
+    def check_port(self) -> None:
+        """Warn (and optionally recover) when the forwarded port is not open.
+
+        A closed forwarded port usually means the VPN provider dropped the port
+        mapping, not that the tunnel is down — so recovery here is opt-in
+        (`PORT_CHECK_RECOVERY`) and shares the tunnel's cooldown gate.
+        """
+        is_open = self.client.port_is_open()
+        if is_open is None:
+            return  # client can't tell; draw no conclusion
+        if is_open:
+            self.port_tracker.record_success()
+            return
+        log.warning("forwarded port appears closed / not reachable from outside")
+        if not self.cfg.port_check_recovery:
+            return
+        self.port_tracker.record_failure()
+        log.warning(
+            "closed-port failures (%d/%d)",
+            self.port_tracker.consecutive,
+            self.port_tracker.threshold,
+        )
+        if self.port_tracker.should_act():
+            self._recover("forwarded port closed")
 
     def assess_health(self) -> bool:
         """Return True when the tunnel is up.
@@ -119,19 +154,41 @@ class Watchdog:
         log.warning("gluetun has no public IP: tun interface appears down")
         return False
 
-    def act(self) -> None:
+    def _resolve_target(self) -> str | None:
+        """Resolve which container to act on.
+
+        Precedence: an explicit ``GLUETUN_CONTAINER`` wins; otherwise resolve
+        ``GLUETUN_SERVICE`` through the compose labels; otherwise fall back to
+        the conventional ``gluetun`` name.
+        """
+        if self.cfg.gluetun_container:
+            return self.cfg.gluetun_container
+        if self.cfg.gluetun_service:
+            return self.docker.resolve_compose_service(
+                self.cfg.gluetun_service, self.cfg.compose_project or None
+            )
+        return "gluetun"
+
+    def _recover(self, reason: str) -> None:
         action = self.cfg.docker_action
         if not self.cfg.enable_docker_action or action == "none":
             log.error(
-                "tunnel down and confirmed, but docker action is disabled "
-                "(manual intervention required)"
+                "recovery needed (%s) but docker action is disabled "
+                "(manual intervention required)",
+                reason,
             )
             return
-        target = self.cfg.gluetun_container
-        log.warning("recovery: %s gluetun container %r", action, target)
+        target = self._resolve_target()
+        if not target:
+            log.error("recovery needed (%s) but target container unresolved", reason)
+            return
+        log.warning("recovery: %s gluetun container %r (%s)", action, target, reason)
         ok = self.docker.stop(target) if action == "stop" else self.docker.restart(target)
         if ok:
             log.info("recovery action succeeded; entering cooldown")
-            self.tracker.mark_action()
+            # A single restart addresses both failure modes: reset both gates so
+            # we never chain a second restart right after the first.
+            self.tunnel_tracker.mark_action()
+            self.port_tracker.mark_action()
         else:
             log.error("recovery action failed; will retry after further failures")

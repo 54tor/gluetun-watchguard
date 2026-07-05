@@ -7,10 +7,15 @@ need is restarting/stopping a container, which is a single POST over the socket.
 from __future__ import annotations
 
 import http.client
+import json
 import logging
 import socket
+from urllib.parse import quote
 
 log = logging.getLogger("watchguard.docker")
+
+_COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
+_COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
@@ -59,6 +64,61 @@ class DockerSocket:
             return True
         log.error("docker API %s returned %s: %s", path, status, _short(body))
         return False
+
+    # --- compose service resolution ---
+    def _get_json(self, path: str):
+        try:
+            status, body = self._request("GET", path)
+        except OSError as exc:
+            log.error("docker socket error on %s: %s", path, exc)
+            return None
+        if status != 200:
+            log.error("docker API %s returned %s: %s", path, status, _short(body))
+            return None
+        try:
+            return json.loads(body)
+        except ValueError:
+            return None
+
+    def inspect(self, container: str) -> dict | None:
+        return self._get_json(f"/containers/{container}/json")
+
+    def detect_compose_project(self) -> str | None:
+        """Read our own container's compose project label (self-detection)."""
+        data = self.inspect(socket.gethostname())
+        if not data:
+            return None
+        labels = (data.get("Config") or {}).get("Labels") or {}
+        return labels.get(_COMPOSE_PROJECT_LABEL)
+
+    def resolve_compose_service(self, service: str, project: str | None = None) -> str | None:
+        """Resolve a compose service to a container id via labels.
+
+        Returns None if the project can't be determined or nothing matches.
+        More robust than a fixed name: it survives `compose up` recreating the
+        container with a new generated name.
+        """
+        project = project or self.detect_compose_project()
+        if not project:
+            log.error(
+                "cannot determine compose project for service %r; "
+                "set COMPOSE_PROJECT or GLUETUN_CONTAINER",
+                service,
+            )
+            return None
+        labels = [
+            f"{_COMPOSE_PROJECT_LABEL}={project}",
+            f"{_COMPOSE_SERVICE_LABEL}={service}",
+        ]
+        filters = json.dumps({"label": labels})
+        containers = self._get_json(f"/containers/json?all=true&filters={quote(filters)}")
+        if not containers:
+            log.error("no container found for compose service %r in project %r", service, project)
+            return None
+        # Prefer a running match if several exist.
+        running = [c for c in containers if c.get("State") == "running"]
+        chosen = (running or containers)[0]
+        return chosen.get("Id") or ((chosen.get("Names") or [None])[0])
 
 
 def _short(body: bytes, limit: int = 200) -> str:

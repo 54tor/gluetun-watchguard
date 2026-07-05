@@ -58,7 +58,7 @@ Modules (`src/gluetun_watchguard/`):
 | `config.py`     | `Config` dataclass; parses & validates env vars              |
 | `log.py`        | stdout logging setup                                          |
 | `gluetun.py`    | gluetun control-server client (`forwarded_port`, `public_ip`)|
-| `dockerctl.py`  | stdlib unix-socket Docker client (`restart`, `stop`)         |
+| `dockerctl.py`  | stdlib unix-socket Docker client (`restart`/`stop` + compose resolution) |
 | `debounce.py`   | `FailureTracker` — the anti-flap state machine               |
 | `watchdog.py`   | orchestration loop + health assessment + recovery            |
 | `clients/`      | `TorrentClient` interface + per-client adapters + factory    |
@@ -69,8 +69,30 @@ Modules (`src/gluetun_watchguard/`):
 2. Otherwise query `gluetun.public_ip()`:
    - IP present ⇒ tunnel up. If the client said "down", it's a client-side
      issue — log it, do **not** restart gluetun.
-   - IP absent ⇒ tunnel down ⇒ record a failure; act only once the
-     `FailureTracker` allows.
+   - IP absent ⇒ tunnel down ⇒ record a failure on `tunnel_tracker`; act only
+     once the `FailureTracker` allows.
+
+## Port-reachability logic (separate from tunnel health)
+
+`client.port_is_open()` reports whether the forwarded port is actually reachable
+(`qbittorrent`: `firewalled` ⇒ closed; `transmission`: `port-test`; `rutorrent`:
+unknown → `None`). A closed port is **always** logged, but only feeds
+`port_tracker` and triggers recovery when `PORT_CHECK_RECOVERY` is set — a closed
+port usually means the provider dropped the mapping, not a tun failure.
+
+`_recover()` is the single choke point for restarts: on success it calls
+`mark_action()` on **both** trackers, so the tunnel and port paths share one
+cooldown and can never chain into a double restart.
+
+## Target resolution
+
+`_resolve_target()` decides which container to act on, in order: explicit
+`GLUETUN_CONTAINER` → `GLUETUN_SERVICE` resolved via compose labels
+(`DockerSocket.resolve_compose_service`, project auto-detected from our own
+container's labels or `COMPOSE_PROJECT`) → the literal `gluetun`. A `None` result
+aborts the recovery with an error rather than acting on the wrong container.
+Resolving by service label is intentional: it survives `compose up` recreating
+gluetun with a new generated name.
 
 ## Contributing
 

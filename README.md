@@ -56,6 +56,17 @@ public IP — not what the torrent client reports. A client that says
 "firewalled"/"disconnected" while gluetun still has a public IP is treated as a
 client-side issue and never triggers a gluetun restart.
 
+### Forwarded-port reachability
+
+Beyond syncing the port, `gluetun-watchguard` can check whether the forwarded
+port is actually **open from the outside** (qBittorrent's `firewalled` status;
+Transmission's built-in `port-test`; ruTorrent has no reliable native signal).
+By default a closed port is only logged as a warning. Set
+`PORT_CHECK_RECOVERY=true` to let a *sustained* closed port trigger a gluetun
+restart (to re-request a port from the VPN provider) — gated by the same
+anti-flap logic, and sharing the tunnel check's cooldown so the two recovery
+paths never chain into a double restart.
+
 ## Quick start (Docker Compose)
 
 A full example lives in [`docker-compose.example.yml`](./docker-compose.example.yml).
@@ -92,6 +103,7 @@ All configuration is via environment variables.
 | `CHECK_INTERVAL`        | `30`                          | Seconds between watch ticks.                               |
 | `ENABLE_PORT_SYNC`      | `true`                        | Enable forwarded-port synchronisation.                     |
 | `ENABLE_HEALTHCHECK`    | `true`                        | Enable tunnel health checking.                             |
+| `ENABLE_PORT_CHECK`     | `true`                        | Check whether the forwarded port is actually reachable.    |
 | `ENABLE_DOCKER_ACTION`  | `true`                        | Allow the recovery action to touch the Docker socket.      |
 | `GLUETUN_CONTROL_URL`   | `http://gluetun:8000`         | gluetun control-server base URL.                           |
 | `GLUETUN_API_KEY`       | _(empty)_                     | `X-API-Key` header, if the control server requires auth.   |
@@ -103,8 +115,11 @@ All configuration is via environment variables.
 | `CLIENT_PASSWORD`       | _(empty)_                     | Torrent client password.                                   |
 | `RUTORRENT_RPC_PATH`    | `/plugins/httprpc/action.php` | ruTorrent httprpc endpoint path (ruTorrent only).          |
 | `DOCKER_SOCKET`         | `/var/run/docker.sock`        | Path to the Docker socket (or a socket-proxy).             |
-| `GLUETUN_CONTAINER`     | `gluetun`                     | Name/id of the gluetun container to act on.                |
+| `GLUETUN_CONTAINER`     | _(empty)_                     | Explicit container name/id to act on (highest precedence). |
+| `GLUETUN_SERVICE`       | _(empty)_                     | Compose service to resolve to a container (same project).  |
+| `COMPOSE_PROJECT`       | _(auto)_                      | Compose project for resolution; auto-detected if empty.    |
 | `DOCKER_ACTION`         | `restart`                     | `restart` \| `stop` \| `none`.                             |
+| `PORT_CHECK_RECOVERY`   | `false`                       | Let a sustained closed forwarded port trigger recovery.    |
 | `FAILURE_THRESHOLD`     | `3`                           | Consecutive failed checks before acting.                   |
 | `RESTART_COOLDOWN`      | `300`                         | Minimum seconds between Docker actions.                    |
 | `STARTUP_GRACE`         | `60`                          | Seconds to ignore failures after start / after an action.  |
@@ -117,6 +132,23 @@ control server (port `8000`). Ensure it is enabled and reachable on your
 Docker network. Recent gluetun versions may require authentication for the
 control API — if so, set `GLUETUN_API_KEY` (or the basic-auth pair) to match
 your gluetun control-server configuration.
+
+### Targeting the gluetun container
+
+The recovery action needs to identify the gluetun container. Note this is
+separate from DNS: the compose service name resolves over the network (so
+`CLIENT_URL=http://gluetun:8080` works), but the Docker API needs a container
+name/id. Two ways to point at it:
+
+- `GLUETUN_CONTAINER` — an explicit name/id (takes precedence). Best when you set
+  `container_name:` in compose.
+- `GLUETUN_SERVICE` — a compose **service** name. When `watchguard` runs in the
+  same compose project, it auto-detects the project from its own container and
+  resolves the service to a container via compose labels. This survives
+  `compose up` recreating gluetun with a new generated name (e.g.
+  `myproject-gluetun-1`). Override auto-detection with `COMPOSE_PROJECT` if your
+  container uses a custom hostname. Requires the Docker API to allow
+  `GET /containers/json` and `/containers/{id}/json` (mind your socket-proxy).
 
 ## Security notes
 

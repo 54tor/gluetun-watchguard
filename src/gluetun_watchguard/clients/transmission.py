@@ -70,3 +70,11 @@ class TransmissionClient(TorrentClient):
     def connection_ok(self) -> bool | None:
         # Transmission exposes no direct "internet" flag; rely on gluetun.
         return None
+
+    def port_is_open(self) -> bool | None:
+        # Transmission's own port-test service reports real inbound reachability.
+        args = self._rpc("port-test")
+        if not args:
+            return None
+        value = args.get("port-is-open")
+        return bool(value) if isinstance(value, bool) else None

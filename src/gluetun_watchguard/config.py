@@ -40,6 +40,7 @@ class Config:
     # --- Feature toggles ---
     enable_port_sync: bool = True
     enable_healthcheck: bool = True
+    enable_port_check: bool = True
     enable_docker_action: bool = True
 
     # --- gluetun control server ---
@@ -57,8 +58,11 @@ class Config:
 
     # --- Docker recovery action ---
     docker_socket: str = "/var/run/docker.sock"
-    gluetun_container: str = "gluetun"
+    gluetun_container: str = ""  # explicit name/id; takes precedence over the service
+    gluetun_service: str = ""  # compose service name, resolved to a container via labels
+    compose_project: str = ""  # compose project for resolution; auto-detected if empty
     docker_action: str = "restart"  # restart | stop | none
+    port_check_recovery: bool = False  # let a closed forwarded port trigger recovery
 
     # --- Anti-flap / debounce ---
     failure_threshold: int = 3  # consecutive failed checks before acting
@@ -84,6 +88,7 @@ class Config:
             check_interval=_env_int("CHECK_INTERVAL", 30),
             enable_port_sync=_env_bool("ENABLE_PORT_SYNC", True),
             enable_healthcheck=_env_bool("ENABLE_HEALTHCHECK", True),
+            enable_port_check=_env_bool("ENABLE_PORT_CHECK", True),
             enable_docker_action=_env_bool("ENABLE_DOCKER_ACTION", True),
             gluetun_url=_env_str("GLUETUN_CONTROL_URL", "http://gluetun:8000").rstrip("/"),
             gluetun_api_key=_env_str("GLUETUN_API_KEY"),
@@ -95,8 +100,11 @@ class Config:
             client_password=_env_str("CLIENT_PASSWORD"),
             rutorrent_rpc_path=_env_str("RUTORRENT_RPC_PATH", "/plugins/httprpc/action.php"),
             docker_socket=_env_str("DOCKER_SOCKET", "/var/run/docker.sock"),
-            gluetun_container=_env_str("GLUETUN_CONTAINER", "gluetun"),
+            gluetun_container=_env_str("GLUETUN_CONTAINER"),
+            gluetun_service=_env_str("GLUETUN_SERVICE"),
+            compose_project=_env_str("COMPOSE_PROJECT"),
             docker_action=action,
+            port_check_recovery=_env_bool("PORT_CHECK_RECOVERY", False),
             failure_threshold=_env_int("FAILURE_THRESHOLD", 3),
             restart_cooldown=_env_int("RESTART_COOLDOWN", 300),
             startup_grace=_env_int("STARTUP_GRACE", 60),
