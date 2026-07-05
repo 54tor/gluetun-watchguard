@@ -72,26 +72,8 @@ Modules (`src/gluetun_watchguard/`):
    - IP absent ⇒ tunnel down ⇒ record a failure; act only once the
      `FailureTracker` allows.
 
-## Dev commands
+## Contributing
 
-```bash
-make install     # pip install -e ".[dev]"
-make test        # pytest
-make lint        # ruff check .
-make run         # python -m gluetun_watchguard   (reads config from env)
-make build       # docker build -t sat0r/gluetun-watchguard:dev .
-```
-
-Tests are offline: client/gluetun/docker are faked, and `FailureTracker` takes
-an injectable `clock` so time-based behaviour is deterministic. No test may hit
-the network or a real Docker socket.
-
-## Conventions
-
-- Python 3.11+, `from __future__ import annotations`, type hints on public APIs.
-- `ruff` clean (`E, F, I, UP, B`), 100-col lines.
-- Config comes from env vars only (12-factor); no config files at runtime.
-- Log at INFO for state changes (port synced, recovery), WARNING for failures,
-  DEBUG for per-probe detail. Never log secrets.
-- Every new env var must be added in three places: `Config`, `.env.example`, and
-  the README configuration table.
+Local development, testing, coding conventions, and the recipes for adding a new
+torrent client or environment variable live in
+[CONTRIBUTING.md](./CONTRIBUTING.md).
