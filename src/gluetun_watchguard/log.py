@@ -18,3 +18,8 @@ def setup_logging(level: str = "INFO") -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+
+    # Quiet third-party HTTP chatter (connection-pool resets, per-request lines)
+    # even at DEBUG, so our own DEBUG logs stay readable.
+    for noisy in ("urllib3", "requests"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
