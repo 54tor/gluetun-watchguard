@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 
@@ -11,7 +12,7 @@ from .config import Config
 from .connectivity import HEALTH_DOWN, HEALTH_UNKNOWN, HEALTH_UP, OutboundProbe
 from .debounce import FailureTracker
 from .dockerctl import DockerSocket
-from .gluetun import build_gluetun
+from .gluetun import build_gluetun, parse_forwarded_port
 
 log = logging.getLogger("watchguard")
 
@@ -73,7 +74,7 @@ class Watchdog:
             self.check_port()
 
     def sync_port(self) -> None:
-        wanted = self.gluetun.forwarded_port()
+        wanted = self._wanted_port()
         if not wanted:
             log.debug("no forwarded port advertised by gluetun yet")
             return
@@ -87,6 +88,27 @@ class Watchdog:
             log.info("port synced: %s -> %s", current, wanted)
         else:
             log.warning("failed to set port %s on %s", wanted, self.cfg.client_kind)
+
+    def _wanted_port(self) -> int | None:
+        # Local file (GLUETUN_PORT_FILE) if mounted, else the control API.
+        port = self.gluetun.forwarded_port()
+        if port is not None:
+            return port
+        # File configured but not present locally (no volume): read it straight
+        # from the gluetun container over the Docker socket we already hold.
+        pf = self.cfg.gluetun_port_file
+        if pf and not os.path.exists(pf):
+            return self._port_from_container(pf)
+        return None
+
+    def _port_from_container(self, path: str) -> int | None:
+        target = self._resolve_target()
+        if not target:
+            return None
+        data = self.docker.read_file(target, path)
+        if data is None:
+            return None
+        return parse_forwarded_port(data.decode("utf-8", "replace"))
 
     def check_health(self) -> None:
         state = self.assess_health()

@@ -59,7 +59,7 @@ Modules (`src/gluetun_watchguard/`):
 | `log.py`        | stdout logging setup                                          |
 | `gluetun.py`    | gluetun client: `forwarded_port` (API or `GLUETUN_PORT_FILE`), `public_ip` |
 | `connectivity.py`| `OutboundProbe` — egress test via gluetun HTTP proxy, public-IP fallback |
-| `dockerctl.py`  | stdlib unix-socket Docker client (`restart`/`stop` + compose resolution) |
+| `dockerctl.py`  | stdlib unix-socket Docker client (`restart`/`stop`, compose resolution, `read_file`) |
 | `debounce.py`   | `FailureTracker` — the anti-flap state machine               |
 | `watchdog.py`   | orchestration loop + health assessment + recovery            |
 | `clients/`      | `TorrentClient` interface + per-client adapters + factory    |
@@ -106,6 +106,14 @@ in-container; `COMPOSE_PROJECT` is required for host/dev runs or a custom
 `/containers/{id}/json` on the socket/proxy.
 Resolving by service label is intentional: it survives `compose up` recreating
 gluetun with a new generated name.
+
+## Port source
+
+`Watchdog._wanted_port()` resolves the forwarded port: the control API by
+default; with `GLUETUN_PORT_FILE` set, the local file if it's mounted, else the
+same file read from the gluetun container via `DockerSocket.read_file` (the
+archive endpoint — no volume needed). `parse_forwarded_port` is the shared
+parser. This lets port sync run without any control-server auth.
 
 ## Contributing
 

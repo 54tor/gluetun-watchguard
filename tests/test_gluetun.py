@@ -1,4 +1,4 @@
-from gluetun_watchguard.gluetun import GluetunControl
+from gluetun_watchguard.gluetun import GluetunControl, parse_forwarded_port
 
 
 def make(port_file=""):
@@ -25,3 +25,13 @@ def test_forwarded_port_file_zero_is_none(tmp_path):
     f = tmp_path / "forwarded_port"
     f.write_text("0")
     assert make(str(f)).forwarded_port() is None
+
+
+def test_parse_forwarded_port_valid():
+    assert parse_forwarded_port("51820\n") == 51820
+
+
+def test_parse_forwarded_port_invalid():
+    assert parse_forwarded_port("nope") is None
+    assert parse_forwarded_port("") is None
+    assert parse_forwarded_port("0") is None

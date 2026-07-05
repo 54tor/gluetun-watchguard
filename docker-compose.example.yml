@@ -45,8 +45,8 @@ services:
       - GLUETUN_CONTROL_URL=http://gluetun:8000
       - GLUETUN_HTTP_PROXY=http://gluetun:8888 # outbound egress test (HTTPPROXY=on)
       # - GLUETUN_API_KEY=change_me            # if the control server needs auth
-      # Avoid control-server auth for port sync: cat the port from gluetun's
-      # status file (share /tmp/gluetun as a volume on both services):
+      # Avoid control-server auth for port sync: read the port from gluetun's
+      # status file. No volume needed — it's fetched via the Docker socket.
       # - GLUETUN_PORT_FILE=/tmp/gluetun/forwarded_port
       - CLIENT_URL=http://gluetun:8080         # qBittorrent shares gluetun's net
       - CLIENT_USERNAME=admin

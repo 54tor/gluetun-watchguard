@@ -165,27 +165,26 @@ your gluetun control-server configuration.
 
 ### Forwarded port without the control server
 
-To skip control-server auth entirely for port sync, point `GLUETUN_PORT_FILE` at
-gluetun's forwarded-port status file (`VPN_PORT_FORWARDING_STATUS_FILE`, default
-`/tmp/gluetun/forwarded_port`) shared as a volume. When set, watchguard just
-reads (`cat`) the port from that file and never calls the control API for it.
-Combined with `GLUETUN_HTTP_PROXY` for the health probe, the whole stack then
-runs without any control-server authentication.
+To skip control-server auth for port sync, point `GLUETUN_PORT_FILE` at gluetun's
+forwarded-port status file (`VPN_PORT_FORWARDING_STATUS_FILE`, default
+`/tmp/gluetun/forwarded_port`). watchguard then obtains the port from that file
+instead of the control API — and **no volume is required**: when the path isn't
+present locally, it reads the file straight from the gluetun container over the
+Docker socket it already holds (the same one used for recovery). Combined with
+`GLUETUN_HTTP_PROXY` for the health probe, the whole stack runs without any
+control-server authentication.
 
 ```yaml
-services:
-  gluetun:
-    volumes:
-      - gluetun_status:/tmp/gluetun
   watchguard:
-    volumes:
-      - gluetun_status:/tmp/gluetun:ro
     environment:
-      - GLUETUN_PORT_FILE=/tmp/gluetun/forwarded_port
+      - GLUETUN_PORT_FILE=/tmp/gluetun/forwarded_port   # read via the Docker socket
       - GLUETUN_HTTP_PROXY=http://gluetun:8888
-volumes:
-  gluetun_status:
 ```
+
+Prefer a volume? Mount `/tmp/gluetun` on both services at the same path — when the
+file exists locally, watchguard reads it directly and skips the socket. Reading
+through the socket needs the Docker API to allow `GET /containers/{id}/archive`
+(mind your socket-proxy).
 
 ### Targeting the gluetun container
 
@@ -215,7 +214,8 @@ Docker daemon. To reduce exposure:
 
 - Put a **docker-socket-proxy** in front of the socket, allow only the container
   `restart`/`stop` calls (plus `GET /containers/json` and `/containers/{id}/json`
-  if you use `GLUETUN_SERVICE` resolution), and point `DOCKER_SOCKET` at the proxy.
+  for `GLUETUN_SERVICE`, and `GET /containers/{id}/archive` for `GLUETUN_PORT_FILE`
+  read via the socket), and point `DOCKER_SOCKET` at the proxy.
 - Or set `DOCKER_ACTION=none` / `ENABLE_DOCKER_ACTION=false` to run in
   observe-and-port-sync mode only, and handle tunnel recovery yourself.
 

@@ -84,16 +84,11 @@ class GluetunControl:
     def _read_port_file(self) -> int | None:
         try:
             with open(self._port_file) as handle:
-                text = handle.read().strip()
+                text = handle.read()
         except OSError as exc:
             log.debug("gluetun port file %s unreadable: %s", self._port_file, exc)
             return None
-        try:
-            port = int(text)
-        except ValueError:
-            log.debug("gluetun port file %s has no valid port: %r", self._port_file, text[:40])
-            return None
-        return port if port > 0 else None
+        return parse_forwarded_port(text)
 
     def public_ip(self) -> str | _Unknown | None:
         """Return gluetun's public IP, tri-state.
@@ -121,3 +116,12 @@ def build_gluetun(cfg) -> GluetunControl:
         timeout=cfg.http_timeout,
         port_file=cfg.gluetun_port_file,
     )
+
+
+def parse_forwarded_port(text: str) -> int | None:
+    """Parse a forwarded-port file/body: a bare port number as text."""
+    try:
+        port = int(text.strip())
+    except (ValueError, AttributeError):
+        return None
+    return port if port > 0 else None

@@ -42,10 +42,12 @@ class FakeClient:
 
 
 class FakeDocker:
-    def __init__(self, resolved="proj-gluetun-1"):
+    def __init__(self, resolved="proj-gluetun-1", file=None):
         self.restarts = []
         self.resolved = resolved
         self.resolve_calls = []
+        self.file = file
+        self.read_calls = []
 
     def restart(self, container, **_):
         self.restarts.append(container)
@@ -58,6 +60,10 @@ class FakeDocker:
     def resolve_compose_service(self, service, project=None):
         self.resolve_calls.append((service, project))
         return self.resolved
+
+    def read_file(self, container, path):
+        self.read_calls.append((container, path))
+        return self.file
 
 
 def make_watchdog(cfg=None, gluetun=None, client=None, docker=None):
@@ -223,6 +229,32 @@ def test_recover_aborts_when_service_unresolved():
     )
     wd.check_health()  # tunnel down -> recovery attempted -> resolve fails -> no restart
     assert d.restarts == []
+
+
+def test_wanted_port_reads_from_container_when_no_volume(tmp_path):
+    missing = str(tmp_path / "forwarded_port")  # not present locally
+    cfg = Config(gluetun_port_file=missing, gluetun_container="gluetun")
+    d = FakeDocker(file=b"48291\n")
+    wd = make_watchdog(cfg=cfg, gluetun=FakeGluetun(port=None), docker=d)
+    assert wd._wanted_port() == 48291
+    assert d.read_calls == [("gluetun", missing)]
+
+
+def test_wanted_port_prefers_local_file_over_socket(tmp_path):
+    f = tmp_path / "forwarded_port"
+    f.write_text("6881")
+    cfg = Config(gluetun_port_file=str(f))
+    d = FakeDocker(file=b"9999")
+    # FakeGluetun returns the port as the real client would after reading the file.
+    wd = make_watchdog(cfg=cfg, gluetun=FakeGluetun(port=6881), docker=d)
+    assert wd._wanted_port() == 6881
+    assert d.read_calls == []
+
+
+def test_wanted_port_api_only_when_no_file():
+    wd = make_watchdog(cfg=Config(), gluetun=FakeGluetun(port=55000), docker=FakeDocker())
+    assert wd._wanted_port() == 55000
+    assert wd.docker.read_calls == []
 
 
 def test_shared_cooldown_prevents_double_restart():

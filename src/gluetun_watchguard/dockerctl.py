@@ -7,9 +7,11 @@ need is restarting/stopping a container, which is a single POST over the socket.
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import logging
 import socket
+import tarfile
 from urllib.parse import quote
 
 log = logging.getLogger("watchguard.docker")
@@ -120,6 +122,36 @@ class DockerSocket:
         chosen = (running or containers)[0]
         return chosen.get("Id") or ((chosen.get("Names") or [None])[0])
 
+    def read_file(self, container: str, path: str) -> bytes | None:
+        """Read a file from a container via the archive endpoint.
+
+        Uses the Docker socket we already hold, so no volume mount is needed.
+        """
+        try:
+            status, body = self._request(
+                "GET", f"/containers/{container}/archive?path={quote(path)}"
+            )
+        except OSError as exc:
+            log.error("docker archive read %s:%s failed: %s", container, path, exc)
+            return None
+        if status != 200:
+            log.debug("docker archive %s:%s -> HTTP %s", container, path, status)
+            return None
+        return _extract_tar_file(body)
+
 
 def _short(body: bytes, limit: int = 200) -> str:
     return body.decode("utf-8", "replace").strip()[:limit]
+
+
+def _extract_tar_file(body: bytes) -> bytes | None:
+    """Return the content of the first regular file in a tar archive."""
+    try:
+        with tarfile.open(fileobj=io.BytesIO(body)) as tar:
+            for member in tar.getmembers():
+                if member.isfile():
+                    handle = tar.extractfile(member)
+                    return handle.read() if handle else None
+    except (tarfile.TarError, OSError):
+        return None
+    return None
