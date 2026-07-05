@@ -70,6 +70,30 @@ restart (to re-request a port from the VPN provider) — gated by the same
 anti-flap logic, and sharing the tunnel check's cooldown so the two recovery
 paths never chain into a double restart.
 
+### Readiness & container health
+
+The container ships a Docker `HEALTHCHECK`: it is **healthy only when gluetun has
+working outbound connectivity**. The probe first makes a request *through
+gluetun's HTTP proxy* (`GLUETUN_HTTP_PROXY`, i.e. `HTTPPROXY=on` on gluetun) —
+direct proof of egress — and falls back to the control server's public IP when no
+proxy is configured. The same probe drives the watch loop's health decision.
+
+Because the health status reflects real egress, you can gate the rest of the
+stack on it in compose, so the torrent client only starts once the tunnel is
+actually up:
+
+```yaml
+  qbittorrent:
+    depends_on:
+      gluetun:
+        condition: service_started
+      watchguard:
+        condition: service_healthy
+```
+
+You can also run the probe once by hand: `gluetun-watchguard healthcheck`
+(exit `0` = healthy, `1` = not).
+
 ## Quick start (Docker Compose)
 
 A full example lives in [`docker-compose.example.yml`](./docker-compose.example.yml).
@@ -104,11 +128,13 @@ All configuration is via environment variables.
 | ----------------------- | ----------------------------- | ---------------------------------------------------------- |
 | `LOG_LEVEL`             | `INFO`                        | Logging level.                                             |
 | `CHECK_INTERVAL`        | `30`                          | Seconds between watch ticks.                               |
+| `HEALTHCHECK_URL`       | `http://cp.cloudflare.com/generate_204` | URL fetched to prove gluetun egress works.       |
 | `ENABLE_PORT_SYNC`      | `true`                        | Enable forwarded-port synchronisation.                     |
 | `ENABLE_HEALTHCHECK`    | `true`                        | Enable tunnel health checking.                             |
 | `ENABLE_PORT_CHECK`     | `true`                        | Check whether the forwarded port is actually reachable.    |
 | `ENABLE_DOCKER_ACTION`  | `true`                        | Allow the recovery action to touch the Docker socket.      |
 | `GLUETUN_CONTROL_URL`   | `http://gluetun:8000`         | gluetun control-server base URL.                           |
+| `GLUETUN_HTTP_PROXY`    | _(empty)_                     | gluetun HTTP proxy (`HTTPPROXY=on`) for the egress probe.  |
 | `GLUETUN_API_KEY`       | _(empty)_                     | `X-API-Key` header, if the control server requires auth.   |
 | `GLUETUN_AUTH_USERNAME` | _(empty)_                     | HTTP basic-auth user for the control server (alternative). |
 | `GLUETUN_AUTH_PASSWORD` | _(empty)_                     | HTTP basic-auth password.                                  |

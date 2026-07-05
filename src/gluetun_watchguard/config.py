@@ -36,6 +36,7 @@ class Config:
     # --- General ---
     log_level: str = "INFO"
     check_interval: int = 30  # seconds between watch ticks
+    healthcheck_url: str = "http://cp.cloudflare.com/generate_204"  # outbound probe target
 
     # --- Feature toggles ---
     enable_port_sync: bool = True
@@ -48,6 +49,7 @@ class Config:
     gluetun_api_key: str = ""
     gluetun_username: str = ""
     gluetun_password: str = ""
+    gluetun_http_proxy: str = ""  # gluetun HTTP proxy (HTTPPROXY=on), e.g. http://gluetun:8888
 
     # --- Torrent client ---
     client_kind: str = "qbittorrent"
@@ -86,6 +88,7 @@ class Config:
         return cls(
             log_level=_env_str("LOG_LEVEL", "INFO").upper(),
             check_interval=_env_int("CHECK_INTERVAL", 30),
+            healthcheck_url=_env_str("HEALTHCHECK_URL", "http://cp.cloudflare.com/generate_204"),
             enable_port_sync=_env_bool("ENABLE_PORT_SYNC", True),
             enable_healthcheck=_env_bool("ENABLE_HEALTHCHECK", True),
             enable_port_check=_env_bool("ENABLE_PORT_CHECK", True),
@@ -94,6 +97,7 @@ class Config:
             gluetun_api_key=_env_str("GLUETUN_API_KEY"),
             gluetun_username=_env_str("GLUETUN_AUTH_USERNAME"),
             gluetun_password=_env_str("GLUETUN_AUTH_PASSWORD"),
+            gluetun_http_proxy=_env_str("GLUETUN_HTTP_PROXY"),
             client_kind=client_kind,
             client_url=_env_str("CLIENT_URL", "http://gluetun:8080").rstrip("/"),
             client_username=_env_str("CLIENT_USERNAME"),

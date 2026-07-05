@@ -87,3 +87,13 @@ class GluetunControl:
             return None
         ip = data.get("public_ip") or data.get("ip")
         return ip or None
+
+
+def build_gluetun(cfg) -> GluetunControl:
+    return GluetunControl(
+        cfg.gluetun_url,
+        api_key=cfg.gluetun_api_key,
+        username=cfg.gluetun_username,
+        password=cfg.gluetun_password,
+        timeout=cfg.http_timeout,
+    )

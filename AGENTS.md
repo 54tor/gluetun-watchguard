@@ -58,6 +58,7 @@ Modules (`src/gluetun_watchguard/`):
 | `config.py`     | `Config` dataclass; parses & validates env vars              |
 | `log.py`        | stdout logging setup                                          |
 | `gluetun.py`    | gluetun control-server client (`forwarded_port`, `public_ip`)|
+| `connectivity.py`| `OutboundProbe` — egress test via gluetun HTTP proxy, public-IP fallback |
 | `dockerctl.py`  | stdlib unix-socket Docker client (`restart`/`stop` + compose resolution) |
 | `debounce.py`   | `FailureTracker` — the anti-flap state machine               |
 | `watchdog.py`   | orchestration loop + health assessment + recovery            |
@@ -65,16 +66,20 @@ Modules (`src/gluetun_watchguard/`):
 
 ## Health-assessment logic (keep this exact ordering)
 
-1. `client.connection_ok()` → `True` ⇒ healthy, stop (no gluetun call needed).
-2. Otherwise query `gluetun.public_ip()`, which is **tri-state**:
-   - a public IP ⇒ tunnel up. If the client said "down", it's a client-side
-     issue — log it, do **not** restart gluetun.
-   - a definitive "no IP" (control server answered) ⇒ tunnel **down** ⇒ record a
-     failure on `tunnel_tracker`; act only once the `FailureTracker` allows.
-   - `UNKNOWN` (control server slow / timed out / errored) ⇒ **draw no
-     conclusion**: log a warning, record neither success nor failure. A slow
-     response must never trigger a restart — this is why `_get` returns
-     `UNKNOWN` on transport errors instead of collapsing to `None`.
+Health = **gluetun has working outbound connectivity**. The same
+`OutboundProbe.check()` drives both the watch loop and the Docker `HEALTHCHECK`
+(`gluetun-watchguard healthcheck`, exit 0/1), so compose can gate the client with
+`depends_on: { condition: service_healthy }`.
+
+1. `client.connection_ok()` → `True` ⇒ healthy, stop (cheap fast-path).
+2. Otherwise `OutboundProbe.check()`, which is **tri-state**:
+   - proxy request succeeds (`GLUETUN_HTTP_PROXY`) or public IP present ⇒ `UP`.
+   - control server answered with no IP (and proxy didn't prove egress) ⇒ `DOWN`
+     ⇒ record a failure on `tunnel_tracker`; act only once the tracker allows.
+   - proxy/control server slow / timed out / errored ⇒ `UNKNOWN` ⇒ **draw no
+     conclusion**: record neither success nor failure. A slow response must never
+     trigger a restart — this is why `gluetun._get` returns `UNKNOWN` on transport
+     errors instead of collapsing to `None`.
 
 ## Port-reachability logic (separate from tunnel health)
 

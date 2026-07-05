@@ -1,4 +1,5 @@
 from gluetun_watchguard.config import Config
+from gluetun_watchguard.connectivity import OutboundProbe
 from gluetun_watchguard.debounce import FailureTracker
 from gluetun_watchguard.gluetun import UNKNOWN
 from gluetun_watchguard.watchdog import Watchdog
@@ -65,6 +66,8 @@ def make_watchdog(cfg=None, gluetun=None, client=None, docker=None):
     wd.gluetun = gluetun or FakeGluetun()
     wd.client = client or FakeClient()
     wd.docker = docker or FakeDocker()
+    # Rebuild the probe against the fake gluetun (no proxy => uses public IP).
+    wd.probe = OutboundProbe(cfg, wd.gluetun)
     wd.tunnel_tracker = FailureTracker(
         cfg.failure_threshold, cfg.restart_cooldown, cfg.startup_grace
     )

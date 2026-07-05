@@ -20,6 +20,12 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir .
 
+# Healthy = gluetun has working outbound connectivity (probed via its HTTP proxy,
+# falling back to the control server's public IP). Lets compose gate the client
+# with `depends_on: { condition: service_healthy }`.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=30s --retries=3 \
+    CMD ["gluetun-watchguard", "healthcheck"]
+
 # The recovery action needs the Docker socket, which is owned by root:docker on
 # the host. The container therefore runs as root by default; harden at runtime
 # with a docker-socket-proxy and/or `group_add` (see README).

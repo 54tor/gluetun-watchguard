@@ -14,6 +14,8 @@ services:
       - VPN_TYPE=wireguard
       # Enable port forwarding so a NAT port is advertised on the control API.
       - VPN_PORT_FORWARDING=on
+      # HTTP proxy (port 8888): watchguard tests real egress through it.
+      - HTTPPROXY=on
       # The control server (port 8000) is what watchguard queries. On recent
       # gluetun versions it may require an auth config; see gluetun docs and set
       # GLUETUN_API_KEY on the watchguard service accordingly.
@@ -28,7 +30,11 @@ services:
     environment:
       - WEBUI_PORT=8080
     depends_on:
-      - gluetun
+      gluetun:
+        condition: service_started
+      # Wait until watchguard reports gluetun's egress is up before starting.
+      watchguard:
+        condition: service_healthy
     restart: unless-stopped
 
   watchguard:
@@ -37,6 +43,7 @@ services:
     environment:
       - TORRENT_CLIENT=qbittorrent
       - GLUETUN_CONTROL_URL=http://gluetun:8000
+      - GLUETUN_HTTP_PROXY=http://gluetun:8888 # outbound egress test (HTTPPROXY=on)
       # - GLUETUN_API_KEY=change_me            # if the control server needs auth
       - CLIENT_URL=http://gluetun:8080         # qBittorrent shares gluetun's net
       - CLIENT_USERNAME=admin
@@ -48,6 +55,13 @@ services:
       - FAILURE_THRESHOLD=3
       - RESTART_COOLDOWN=300
       - STARTUP_GRACE=60
+    healthcheck:
+      # Healthy once gluetun's egress works — gates the client above.
+      test: ["CMD", "gluetun-watchguard", "healthcheck"]
+      interval: 30s
+      timeout: 15s
+      start_period: 30s
+      retries: 3
     volumes:
       # Required for the recovery action (restarting gluetun). Read-write.
       # For tighter security, put a docker-socket-proxy in front and point

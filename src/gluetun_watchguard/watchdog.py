@@ -8,25 +8,19 @@ import threading
 
 from .clients.base import build_client
 from .config import Config
+from .connectivity import HEALTH_DOWN, HEALTH_UNKNOWN, HEALTH_UP, OutboundProbe
 from .debounce import FailureTracker
 from .dockerctl import DockerSocket
-from .gluetun import UNKNOWN, GluetunControl
+from .gluetun import build_gluetun
 
 log = logging.getLogger("watchguard")
-
-_UP, _DOWN, _UNKNOWN = "up", "down", "unknown"
 
 
 class Watchdog:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.gluetun = GluetunControl(
-            cfg.gluetun_url,
-            api_key=cfg.gluetun_api_key,
-            username=cfg.gluetun_username,
-            password=cfg.gluetun_password,
-            timeout=cfg.http_timeout,
-        )
+        self.gluetun = build_gluetun(cfg)
+        self.probe = OutboundProbe(cfg, self.gluetun)
         self.client = build_client(cfg)
         self.docker = DockerSocket(cfg.docker_socket, timeout=max(30, cfg.http_timeout))
         # One gate per failure mode; both share the cooldown via _recover() so a
@@ -96,12 +90,12 @@ class Watchdog:
 
     def check_health(self) -> None:
         state = self.assess_health()
-        if state == _UP:
+        if state == HEALTH_UP:
             if self.tunnel_tracker.consecutive:
                 log.info("tunnel health recovered")
             self.tunnel_tracker.record_success()
             return
-        if state == _UNKNOWN:
+        if state == HEALTH_UNKNOWN:
             # Slow or unreachable control server: draw no conclusion. Record
             # neither success nor failure so latency alone can never act.
             log.warning("tunnel health unknown (control server slow/unreachable); not acting")
@@ -141,30 +135,25 @@ class Watchdog:
             self._recover("forwarded port closed")
 
     def assess_health(self) -> str:
-        """Classify tunnel health as ``_UP``, ``_DOWN`` or ``_UNKNOWN``.
+        """Classify gluetun's outbound connectivity as UP / DOWN / UNKNOWN.
 
-        Escalation order (cheap first): ask the torrent client whether it sees
-        connectivity; only if that is negative/unknown do we consult the
-        authoritative signal — gluetun's public IP. A slow or unreachable
-        control server yields ``_UNKNOWN`` (never treated as down), so latency
-        alone can never trigger a restart.
+        Cheap first: if the torrent client reports it is connected, treat as up.
+        Otherwise run the shared outbound probe (a request through gluetun's HTTP
+        proxy, falling back to the control server's public IP). A slow or
+        unreachable probe yields UNKNOWN and is never treated as down.
         """
         client_status = self.client.connection_ok()
         if client_status is True:
-            return _UP
-        ip = self.gluetun.public_ip()
-        if ip is UNKNOWN:
-            return _UNKNOWN
-        if ip:
-            if client_status is False:
-                log.info(
-                    "client reports no connectivity but tunnel is up (ip=%s); "
-                    "not a tun failure, leaving gluetun alone",
-                    ip,
-                )
-            return _UP
-        log.warning("gluetun reports no public IP: tun interface appears down")
-        return _DOWN
+            return HEALTH_UP
+        state = self.probe.check()
+        if state == HEALTH_UP and client_status is False:
+            log.info(
+                "client reports no connectivity but gluetun outbound is up; "
+                "not a tun failure, leaving gluetun alone"
+            )
+        elif state == HEALTH_DOWN:
+            log.warning("gluetun has no outbound connectivity: tun interface appears down")
+        return state
 
     def _resolve_target(self) -> str | None:
         """Resolve which container to act on.
