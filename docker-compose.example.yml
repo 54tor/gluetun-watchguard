@@ -1,0 +1,56 @@
+# Example stack: gluetun + qBittorrent + gluetun-watchguard.
+# Copy to docker-compose.yml and adjust provider/credentials before use.
+
+services:
+  gluetun:
+    image: qmcgaw/gluetun
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=your_provider
+      - VPN_TYPE=wireguard
+      # Enable port forwarding so a NAT port is advertised on the control API.
+      - VPN_PORT_FORWARDING=on
+      # The control server (port 8000) is what watchguard queries. On recent
+      # gluetun versions it may require an auth config; see gluetun docs and set
+      # GLUETUN_API_KEY on the watchguard service accordingly.
+    ports:
+      - "8080:8080" # qBittorrent WebUI, published through gluetun's namespace
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent
+    container_name: qbittorrent
+    network_mode: "service:gluetun" # share gluetun's network namespace
+    environment:
+      - WEBUI_PORT=8080
+    depends_on:
+      - gluetun
+    restart: unless-stopped
+
+  watchguard:
+    image: sat0r/gluetun-watchguard:latest
+    container_name: gluetun-watchguard
+    environment:
+      - TORRENT_CLIENT=qbittorrent
+      - GLUETUN_CONTROL_URL=http://gluetun:8000
+      # - GLUETUN_API_KEY=change_me            # if the control server needs auth
+      - CLIENT_URL=http://gluetun:8080         # qBittorrent shares gluetun's net
+      - CLIENT_USERNAME=admin
+      - CLIENT_PASSWORD=adminadmin
+      - GLUETUN_CONTAINER=gluetun              # container to restart on tun loss
+      - CHECK_INTERVAL=30
+      - FAILURE_THRESHOLD=3
+      - RESTART_COOLDOWN=300
+      - STARTUP_GRACE=60
+    volumes:
+      # Required for the recovery action (restarting gluetun). Read-write.
+      # For tighter security, put a docker-socket-proxy in front and point
+      # DOCKER_SOCKET at it instead of mounting the raw socket.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - gluetun
+    restart: unless-stopped
