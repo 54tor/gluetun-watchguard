@@ -10,8 +10,10 @@ class FakeGluetun:
         self.port = port
         self.ip = ip
         self.ip_calls = 0
+        self.port_calls = 0
 
     def forwarded_port(self):
+        self.port_calls += 1
         return self.port
 
     def public_ip(self):
@@ -238,6 +240,7 @@ def test_wanted_port_reads_from_container_when_no_volume(tmp_path):
     wd = make_watchdog(cfg=cfg, gluetun=FakeGluetun(port=None), docker=d)
     assert wd._wanted_port() == 48291
     assert d.read_calls == [("gluetun", missing)]
+    assert wd.gluetun.port_calls == 0  # socket mode skips the local read entirely
 
 
 def test_wanted_port_prefers_local_file_over_socket(tmp_path):

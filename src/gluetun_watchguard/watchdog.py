@@ -90,16 +90,14 @@ class Watchdog:
             log.warning("failed to set port %s on %s", wanted, self.cfg.client_kind)
 
     def _wanted_port(self) -> int | None:
-        # Local file (GLUETUN_PORT_FILE) if mounted, else the control API.
-        port = self.gluetun.forwarded_port()
-        if port is not None:
-            return port
-        # File configured but not present locally (no volume): read it straight
-        # from the gluetun container over the Docker socket we already hold.
         pf = self.cfg.gluetun_port_file
-        if pf and not os.path.exists(pf):
-            return self._port_from_container(pf)
-        return None
+        if not pf:
+            return self.gluetun.forwarded_port()  # control API
+        if os.path.exists(pf):
+            return self.gluetun.forwarded_port()  # local file (mounted volume)
+        # No volume: read the file straight from the gluetun container over the
+        # Docker socket we already hold (avoids a doomed local open + noisy log).
+        return self._port_from_container(pf)
 
     def _port_from_container(self, path: str) -> int | None:
         target = self._resolve_target()
@@ -108,7 +106,10 @@ class Watchdog:
         data = self.docker.read_file(target, path)
         if data is None:
             return None
-        return parse_forwarded_port(data.decode("utf-8", "replace"))
+        port = parse_forwarded_port(data.decode("utf-8", "replace"))
+        if port is not None:
+            log.debug("forwarded port %d read from %s:%s via the docker socket", port, target, path)
+        return port
 
     def check_health(self) -> None:
         state = self.assess_health()
