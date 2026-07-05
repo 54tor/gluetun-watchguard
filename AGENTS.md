@@ -66,11 +66,15 @@ Modules (`src/gluetun_watchguard/`):
 ## Health-assessment logic (keep this exact ordering)
 
 1. `client.connection_ok()` → `True` ⇒ healthy, stop (no gluetun call needed).
-2. Otherwise query `gluetun.public_ip()`:
-   - IP present ⇒ tunnel up. If the client said "down", it's a client-side
+2. Otherwise query `gluetun.public_ip()`, which is **tri-state**:
+   - a public IP ⇒ tunnel up. If the client said "down", it's a client-side
      issue — log it, do **not** restart gluetun.
-   - IP absent ⇒ tunnel down ⇒ record a failure on `tunnel_tracker`; act only
-     once the `FailureTracker` allows.
+   - a definitive "no IP" (control server answered) ⇒ tunnel **down** ⇒ record a
+     failure on `tunnel_tracker`; act only once the `FailureTracker` allows.
+   - `UNKNOWN` (control server slow / timed out / errored) ⇒ **draw no
+     conclusion**: log a warning, record neither success nor failure. A slow
+     response must never trigger a restart — this is why `_get` returns
+     `UNKNOWN` on transport errors instead of collapsing to `None`.
 
 ## Port-reachability logic (separate from tunnel health)
 

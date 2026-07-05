@@ -54,7 +54,10 @@ when **all** of these hold:
 The **authoritative** signal for "the tunnel is down" is gluetun losing its
 public IP — not what the torrent client reports. A client that says
 "firewalled"/"disconnected" while gluetun still has a public IP is treated as a
-client-side issue and never triggers a gluetun restart.
+client-side issue and never triggers a gluetun restart. A **slow or unreachable**
+control server is treated as *unknown* — logged but never acted on; only a
+definitive "no public IP" answer counts as tunnel-down, so latency alone can
+never cause a restart.
 
 ### Forwarded-port reachability
 

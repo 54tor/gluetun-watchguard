@@ -1,5 +1,6 @@
 from gluetun_watchguard.config import Config
 from gluetun_watchguard.debounce import FailureTracker
+from gluetun_watchguard.gluetun import UNKNOWN
 from gluetun_watchguard.watchdog import Watchdog
 
 
@@ -113,6 +114,30 @@ def test_restart_after_sustained_tunnel_loss():
     assert d.restarts == []
     wd.check_health()  # failure 2 -> act
     assert d.restarts == ["gluetun"]
+
+
+def test_unknown_control_server_never_acts_and_holds_counter():
+    cfg = Config(startup_grace=0, failure_threshold=1, restart_cooldown=0)
+    d = FakeDocker()
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip=UNKNOWN), client=FakeClient(conn=None), docker=d
+    )
+    for _ in range(5):
+        wd.check_health()  # slow/unreachable control server, every tick
+    assert d.restarts == []
+    assert wd.tunnel_tracker.consecutive == 0  # latency must not count as a failure
+
+
+def test_slow_client_with_healthy_tunnel_stays_up():
+    # client times out (connection_ok -> None) but gluetun still has a public IP
+    cfg = Config(startup_grace=0, failure_threshold=1, restart_cooldown=0)
+    d = FakeDocker()
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip="1.2.3.4"), client=FakeClient(conn=None), docker=d
+    )
+    wd.check_health()
+    assert d.restarts == []
+    assert wd.tunnel_tracker.consecutive == 0
 
 
 def test_no_restart_when_action_disabled():

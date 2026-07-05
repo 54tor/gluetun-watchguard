@@ -9,6 +9,25 @@ import requests
 log = logging.getLogger("watchguard.gluetun")
 
 
+class _Unknown:
+    """Sentinel: the control server could not be reached / did not answer.
+
+    Distinct from a definitive negative (a valid response carrying no IP), so a
+    slow or unreachable control server is never mistaken for "tunnel down".
+    """
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "UNKNOWN"
+
+
+UNKNOWN = _Unknown()
+
+
 class GluetunControl:
     """Reads the forwarded port and public IP from gluetun's HTTP control API."""
 
@@ -28,7 +47,12 @@ class GluetunControl:
             self._session.headers["X-API-Key"] = api_key
         self._auth = (username, password) if username else None
 
-    def _get(self, path: str) -> dict | None:
+    def _get(self, path: str) -> dict | _Unknown:
+        """Return parsed JSON on success, or ``UNKNOWN`` on transport/HTTP error.
+
+        A timeout or connection error is *not* a definitive answer, so callers
+        must not treat it as "down".
+        """
         url = f"{self._base}{path}"
         try:
             resp = self._session.get(url, auth=self._auth, timeout=self._timeout)
@@ -36,25 +60,29 @@ class GluetunControl:
             return resp.json()
         except (requests.RequestException, ValueError) as exc:
             log.debug("gluetun GET %s failed: %s", path, exc)
-            return None
+            return UNKNOWN
 
     def forwarded_port(self) -> int | None:
         """Return the VPN-forwarded port, or None if not available yet."""
         data = self._get("/v1/openvpn/portforwarded")
-        if not data:
+        if data is UNKNOWN or not data:
             return None
         port = data.get("port")
         if isinstance(port, int) and port > 0:
             return port
         return None
 
-    def public_ip(self) -> str | None:
-        """Return gluetun's current public IP, or None if the tunnel is down.
+    def public_ip(self) -> str | _Unknown | None:
+        """Return gluetun's public IP, tri-state.
 
-        A missing public IP is our authoritative signal that the ``tun``
-        interface is down / not routing.
+        * a non-empty string ⇒ tunnel up and routing;
+        * ``None`` ⇒ the control server answered but carries no IP (tunnel down);
+        * ``UNKNOWN`` ⇒ the control server was slow / unreachable — draw no
+          conclusion (a slow response must never trigger a restart).
         """
         data = self._get("/v1/publicip/ip")
+        if data is UNKNOWN:
+            return UNKNOWN
         if not data:
             return None
         ip = data.get("public_ip") or data.get("ip")

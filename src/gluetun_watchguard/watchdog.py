@@ -10,9 +10,11 @@ from .clients.base import build_client
 from .config import Config
 from .debounce import FailureTracker
 from .dockerctl import DockerSocket
-from .gluetun import GluetunControl
+from .gluetun import UNKNOWN, GluetunControl
 
 log = logging.getLogger("watchguard")
+
+_UP, _DOWN, _UNKNOWN = "up", "down", "unknown"
 
 
 class Watchdog:
@@ -93,10 +95,16 @@ class Watchdog:
             log.warning("failed to set port %s on %s", wanted, self.cfg.client_kind)
 
     def check_health(self) -> None:
-        if self.assess_health():
+        state = self.assess_health()
+        if state == _UP:
             if self.tunnel_tracker.consecutive:
                 log.info("tunnel health recovered")
             self.tunnel_tracker.record_success()
+            return
+        if state == _UNKNOWN:
+            # Slow or unreachable control server: draw no conclusion. Record
+            # neither success nor failure so latency alone can never act.
+            log.warning("tunnel health unknown (control server slow/unreachable); not acting")
             return
         self.tunnel_tracker.record_failure()
         log.warning(
@@ -132,27 +140,31 @@ class Watchdog:
         if self.port_tracker.should_act():
             self._recover("forwarded port closed")
 
-    def assess_health(self) -> bool:
-        """Return True when the tunnel is up.
+    def assess_health(self) -> str:
+        """Classify tunnel health as ``_UP``, ``_DOWN`` or ``_UNKNOWN``.
 
         Escalation order (cheap first): ask the torrent client whether it sees
-        connectivity, and only if that is negative/unknown do we consult the
-        authoritative signal — gluetun's public IP (tun up and routing).
+        connectivity; only if that is negative/unknown do we consult the
+        authoritative signal — gluetun's public IP. A slow or unreachable
+        control server yields ``_UNKNOWN`` (never treated as down), so latency
+        alone can never trigger a restart.
         """
         client_status = self.client.connection_ok()
         if client_status is True:
-            return True
+            return _UP
         ip = self.gluetun.public_ip()
-        if ip is not None:
+        if ip is UNKNOWN:
+            return _UNKNOWN
+        if ip:
             if client_status is False:
                 log.info(
                     "client reports no connectivity but tunnel is up (ip=%s); "
                     "not a tun failure, leaving gluetun alone",
                     ip,
                 )
-            return True
-        log.warning("gluetun has no public IP: tun interface appears down")
-        return False
+            return _UP
+        log.warning("gluetun reports no public IP: tun interface appears down")
+        return _DOWN
 
     def _resolve_target(self) -> str | None:
         """Resolve which container to act on.
