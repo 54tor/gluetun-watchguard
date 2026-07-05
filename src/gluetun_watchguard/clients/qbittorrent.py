@@ -38,10 +38,19 @@ class QbittorrentClient(TorrentClient):
         except requests.RequestException as exc:
             log.debug("qbittorrent login failed: %s", exc)
             return False
-        if resp.status_code == 200 and resp.text.strip() == "Ok.":
+        if resp.status_code == 200:
+            # Standard flow: body is "Ok." on success, "Fails." on bad creds.
+            if resp.text.strip() == "Ok.":
+                self._logged_in = True
+                return True
+            log.debug("qbittorrent login rejected: %s", resp.text[:80])
+            return False
+        if 200 <= resp.status_code < 300:
+            # Some setups (WebUI auth bypassed for whitelisted/localhost clients)
+            # answer the login with a 2xx and no body; treat as authenticated.
             self._logged_in = True
             return True
-        log.debug("qbittorrent login rejected: %s %s", resp.status_code, resp.text[:80])
+        log.debug("qbittorrent login rejected: HTTP %s", resp.status_code)
         return False
 
     def _api(self, method: str, path: str, **kwargs) -> requests.Response | None:
