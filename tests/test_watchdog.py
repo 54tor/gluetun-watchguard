@@ -44,19 +44,28 @@ class FakeClient:
 
 
 class FakeDocker:
-    def __init__(self, resolved="proj-gluetun-1", file=None):
+    def __init__(self, resolved="proj-gluetun-1", file=None, running=True, health=None):
         self.restarts = []
+        self.stops = []
+        self.starts = []
         self.resolved = resolved
         self.resolve_calls = []
         self.file = file
         self.read_calls = []
+        self.running = running
+        self.health = health
+        self.state_calls = 0
 
     def restart(self, container, **_):
         self.restarts.append(container)
         return True
 
     def stop(self, container, **_):
-        self.restarts.append(container)
+        self.stops.append(container)
+        return True
+
+    def start(self, container, **_):
+        self.starts.append(container)
         return True
 
     def resolve_compose_service(self, service, project=None):
@@ -66,6 +75,10 @@ class FakeDocker:
     def read_file(self, container, path):
         self.read_calls.append((container, path))
         return self.file
+
+    def container_state(self, container):
+        self.state_calls += 1
+        return self.running, self.health
 
 
 def make_watchdog(cfg=None, gluetun=None, client=None, docker=None):
@@ -288,3 +301,181 @@ def test_shared_cooldown_prevents_double_restart():
     assert d.restarts == ["gluetun"]
     wd.check_port()  # port closed too, but shared cooldown blocks a second restart
     assert d.restarts == ["gluetun"]
+
+
+# --- G1: container-health escalation on UNKNOWN ---
+
+
+def test_unknown_escalates_to_recovery_when_container_exited():
+    cfg = Config(
+        startup_grace=0, failure_threshold=1, restart_cooldown=0, gluetun_container="gluetun"
+    )
+    d = FakeDocker(running=False)  # container exited
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip=UNKNOWN), client=FakeClient(conn=None), docker=d
+    )
+    wd.check_health()  # UNKNOWN + dead container -> DOWN -> restart
+    assert d.restarts == ["gluetun"]
+
+
+def test_unknown_escalates_when_container_unhealthy():
+    cfg = Config(
+        startup_grace=0, failure_threshold=1, restart_cooldown=0, gluetun_container="gluetun"
+    )
+    d = FakeDocker(running=True, health="unhealthy")
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip=UNKNOWN), client=FakeClient(conn=None), docker=d
+    )
+    wd.check_health()
+    assert d.restarts == ["gluetun"]
+
+
+def test_unknown_stays_unknown_when_container_alive():
+    cfg = Config(
+        startup_grace=0, failure_threshold=1, restart_cooldown=0, gluetun_container="gluetun"
+    )
+    d = FakeDocker(running=True, health=None)
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip=UNKNOWN), client=FakeClient(conn=None), docker=d
+    )
+    wd.check_health()
+    assert d.restarts == []
+    assert wd.tunnel_tracker.consecutive == 0
+
+
+def test_container_health_toggle_off_skips_inspection():
+    cfg = Config(
+        enable_container_health=False,
+        startup_grace=0,
+        failure_threshold=1,
+        restart_cooldown=0,
+        gluetun_container="gluetun",
+    )
+    d = FakeDocker(running=False)
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip=UNKNOWN), client=FakeClient(conn=None), docker=d
+    )
+    wd.check_health()
+    assert d.restarts == []
+    assert d.state_calls == 0
+
+
+# --- G2: HEALTH_REQUIRE_EGRESS ---
+
+
+def test_health_require_egress_ignores_connected_client():
+    cfg = Config(
+        health_require_egress=True,
+        startup_grace=0,
+        failure_threshold=1,
+        restart_cooldown=0,
+        gluetun_container="gluetun",
+    )
+    d = FakeDocker()
+    g = FakeGluetun(ip=None)  # egress is actually down
+    wd = make_watchdog(cfg=cfg, gluetun=g, client=FakeClient(conn=True), docker=d)
+    wd.check_health()  # client 'connected' ignored; probe says DOWN -> restart
+    assert d.restarts == ["gluetun"]
+    assert g.ip_calls == 1  # egress was probed
+
+
+def test_default_trusts_connected_client_fastpath():
+    cfg = Config(startup_grace=0, failure_threshold=1, restart_cooldown=0)
+    g = FakeGluetun(ip=None)
+    d = FakeDocker()
+    wd = make_watchdog(cfg=cfg, gluetun=g, client=FakeClient(conn=True), docker=d)
+    wd.check_health()
+    assert d.restarts == []
+    assert g.ip_calls == 0  # fast-path, egress not probed
+
+
+# --- Recovery cycle (kill-switch) ---
+
+
+def test_recovery_cycles_client_stop_restart_await_start():
+    cfg = Config(
+        startup_grace=0,
+        failure_threshold=1,
+        restart_cooldown=0,
+        gluetun_container="gluetun",
+        client_container="qbit",
+        recovery_healthy_timeout=30,
+    )
+    d = FakeDocker()
+    g = FakeGluetun(ip=None)  # tunnel down
+    wd = make_watchdog(cfg=cfg, gluetun=g, client=FakeClient(conn=False), docker=d)
+    now = [1000.0]
+    wd._clock = lambda: now[0]
+
+    wd.check_health()  # DOWN -> start the recovery cycle
+    assert d.stops == ["qbit"]
+    assert d.restarts == ["gluetun"]
+    assert d.starts == []
+    assert wd._recovery_until == 1030.0
+
+    now[0] = 1010.0
+    wd.tick()  # still down, before deadline -> keep waiting
+    assert d.starts == []
+
+    g.ip = "1.2.3.4"  # gluetun healthy again
+    now[0] = 1015.0
+    wd.tick()
+    assert d.starts == ["qbit"]
+    assert wd._recovery_until is None
+
+
+def test_recovery_starts_client_after_timeout():
+    cfg = Config(
+        startup_grace=0,
+        failure_threshold=1,
+        restart_cooldown=0,
+        gluetun_container="gluetun",
+        client_container="qbit",
+        recovery_healthy_timeout=30,
+    )
+    d = FakeDocker()
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip=None), client=FakeClient(conn=False), docker=d
+    )
+    now = [1000.0]
+    wd._clock = lambda: now[0]
+    wd.check_health()  # recovery, until=1030
+    now[0] = 1031.0
+    wd.tick()  # past deadline, still down -> start client anyway
+    assert d.starts == ["qbit"]
+    assert wd._recovery_until is None
+
+
+def test_recovery_without_client_just_restarts_gluetun():
+    cfg = Config(
+        startup_grace=0, failure_threshold=1, restart_cooldown=0, gluetun_container="gluetun"
+    )
+    d = FakeDocker()
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip=None), client=FakeClient(conn=False), docker=d
+    )
+    wd.check_health()
+    assert d.restarts == ["gluetun"]
+    assert d.stops == []
+    assert d.starts == []
+    assert wd._recovery_until is None
+
+
+def test_recovery_stop_action_is_killswitch():
+    cfg = Config(
+        startup_grace=0,
+        failure_threshold=1,
+        restart_cooldown=0,
+        docker_action="stop",
+        gluetun_container="gluetun",
+        client_container="qbit",
+    )
+    d = FakeDocker()
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip=None), client=FakeClient(conn=False), docker=d
+    )
+    wd.check_health()
+    assert d.stops == ["qbit", "gluetun"]
+    assert d.restarts == []
+    assert d.starts == []
+    assert wd._recovery_until is None

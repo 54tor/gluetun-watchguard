@@ -55,6 +55,10 @@ class DockerSocket:
         """Stop a container by name or id. Returns True on success."""
         return self._act(f"/containers/{container}/stop?t={timeout_seconds}")
 
+    def start(self, container: str) -> bool:
+        """Start a container by name or id. Returns True on success."""
+        return self._act(f"/containers/{container}/start")
+
     def _act(self, path: str) -> bool:
         try:
             status, body = self._request("POST", path)
@@ -138,6 +142,19 @@ class DockerSocket:
             log.debug("docker archive %s:%s -> HTTP %s", container, path, status)
             return None
         return _extract_tar_file(body)
+
+    def container_state(self, container: str) -> tuple[bool | None, str | None]:
+        """Return (running, health) from the container's State, or (None, None).
+
+        ``health`` is "healthy"/"unhealthy"/"starting"/None (no healthcheck).
+        """
+        data = self.inspect(container)
+        if not data:
+            return None, None
+        state = data.get("State") or {}
+        running = state.get("Running")
+        health = (state.get("Health") or {}).get("Status")
+        return (running if isinstance(running, bool) else None), health
 
 
 def _short(body: bytes, limit: int = 200) -> str:

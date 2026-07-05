@@ -59,7 +59,7 @@ Modules (`src/gluetun_watchguard/`):
 | `log.py`        | stdout logging setup                                          |
 | `gluetun.py`    | gluetun client: `forwarded_port` (API or `GLUETUN_PORT_FILE`), `public_ip` |
 | `connectivity.py`| `OutboundProbe` — egress test via gluetun HTTP proxy, public-IP fallback |
-| `dockerctl.py`  | stdlib unix-socket Docker client (`restart`/`stop`, compose resolution, `read_file`) |
+| `dockerctl.py`  | stdlib socket Docker client (`restart`/`stop`/`start`, resolution, `read_file`, `container_state`) |
 | `debounce.py`   | `FailureTracker` — the anti-flap state machine               |
 | `watchdog.py`   | orchestration loop + health assessment + recovery            |
 | `clients/`      | `TorrentClient` interface + per-client adapters + factory    |
@@ -114,6 +114,29 @@ default; with `GLUETUN_PORT_FILE` set, the local file if it's mounted, else the
 same file read from the gluetun container via `DockerSocket.read_file` (the
 archive endpoint — no volume needed). `parse_forwarded_port` is the shared
 parser. This lets port sync run without any control-server auth.
+
+## Recovery
+
+`_recover(reason)` is the single choke point for Docker actions:
+
+- Targets: `_resolve_target()` (gluetun) and `_resolve_client()` (torrent client)
+  each honour an explicit `*_CONTAINER`, then a `*_SERVICE` compose lookup.
+- `DOCKER_ACTION=none`/disabled → log only; unresolved gluetun → abort.
+- **No client** configured → plain gluetun restart.
+- **Client** configured → orchestrated cycle: stop client → restart gluetun → set
+  `_recovery_until`; across ticks `_advance_recovery()` waits for
+  `assess_health()==UP` (then starts the client) or the `RECOVERY_HEALTHY_TIMEOUT`
+  deadline (starts it anyway). While recovering, `tick()` only advances recovery
+  and the loop polls every `_RECOVERY_POLL`s.
+- `DOCKER_ACTION=stop` → kill-switch: stop client then gluetun, no restart/wait.
+
+On success `_mark_recovered()` marks **both** trackers (shared cooldown + re-grace)
+so tunnel and port paths never chain a double restart.
+
+**Escalations:** on `UNKNOWN`, `_gluetun_is_dead()` (`ENABLE_CONTAINER_HEALTH`)
+inspects `container_state` — `Running is False` or `Health=="unhealthy"` promotes
+it to `DOWN`. `HEALTH_REQUIRE_EGRESS` skips the client fast-path so egress is
+always verified.
 
 ## Contributing
 

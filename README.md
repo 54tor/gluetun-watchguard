@@ -59,6 +59,29 @@ control server is treated as *unknown* — logged but never acted on; only a
 definitive "no public IP" answer counts as tunnel-down, so latency alone can
 never cause a restart.
 
+### Recovery, container-health escalation and the client cycle
+
+When the tunnel is confirmed down (past the anti-flap gate), watchguard restarts
+gluetun. Two refinements:
+
+- **Container-health escalation** (`ENABLE_CONTAINER_HEALTH`, on by default): a
+  fully hung/crashed gluetun answers neither the control server nor the proxy, so
+  health reads *unknown* and would normally be left alone. watchguard then
+  inspects the gluetun container over the socket; if it is **exited** or
+  **`unhealthy`**, the *unknown* is escalated to a real *down* and recovery runs.
+- **Client cycle / kill-switch** (set `CLIENT_CONTAINER` or `CLIENT_SERVICE`):
+  recovery becomes an orchestrated sequence — **stop the torrent client →
+  restart gluetun → wait until egress is healthy again (up to
+  `RECOVERY_HEALTHY_TIMEOUT`) → start the client**. This is the correct pattern
+  for clients using `network_mode: "service:gluetun"`, which must be recycled
+  after gluetun restarts, and it doubles as a kill-switch (no torrent traffic
+  while the VPN is down). Without a client configured, recovery is a plain
+  gluetun restart. With `DOCKER_ACTION=stop` it becomes stop-client-then-gluetun
+  (no restart).
+
+Set `HEALTH_REQUIRE_EGRESS=true` to make health *always* verify real egress
+instead of trusting the client's "connected" status.
+
 ### Forwarded-port reachability
 
 Beyond syncing the port, `gluetun-watchguard` can check whether the forwarded
@@ -129,9 +152,11 @@ All configuration is via environment variables.
 | `LOG_LEVEL`             | `INFO`                        | Logging level.                                             |
 | `CHECK_INTERVAL`        | `30`                          | Seconds between watch ticks.                               |
 | `HEALTHCHECK_URL`       | `http://cp.cloudflare.com/generate_204` | URL fetched to prove gluetun egress works.       |
+| `HEALTH_REQUIRE_EGRESS` | `false`                       | Always probe egress; ignore the client's "connected" status. |
 | `ENABLE_PORT_SYNC`      | `true`                        | Enable forwarded-port synchronisation.                     |
 | `ENABLE_HEALTHCHECK`    | `true`                        | Enable tunnel health checking.                             |
 | `ENABLE_PORT_CHECK`     | `true`                        | Check whether the forwarded port is actually reachable.    |
+| `ENABLE_CONTAINER_HEALTH` | `true`                      | Escalate an *unknown* to recovery if the gluetun container is exited/unhealthy. |
 | `ENABLE_DOCKER_ACTION`  | `true`                        | Allow the recovery action to touch the Docker socket.      |
 | `GLUETUN_CONTROL_URL`   | `http://gluetun:8000`         | gluetun control-server base URL.                           |
 | `GLUETUN_HTTP_PROXY`    | _(empty)_                     | gluetun HTTP proxy (`HTTPPROXY=on`) for the egress probe.  |
@@ -144,12 +169,15 @@ All configuration is via environment variables.
 | `CLIENT_USERNAME`       | _(empty)_                     | Torrent client username.                                   |
 | `CLIENT_PASSWORD`       | _(empty)_                     | Torrent client password.                                   |
 | `RUTORRENT_RPC_PATH`    | `/plugins/httprpc/action.php` | ruTorrent httprpc endpoint path (ruTorrent only).          |
+| `CLIENT_CONTAINER`      | _(empty)_                     | Torrent client container to stop/start on recovery (kill-switch). |
+| `CLIENT_SERVICE`        | _(empty)_                     | …or its compose service name, resolved via labels.         |
 | `DOCKER_SOCKET`         | `/var/run/docker.sock`        | Path to the Docker socket (or a socket-proxy).             |
 | `GLUETUN_CONTAINER`     | _(empty)_                     | Explicit container name/id to act on (highest precedence). |
 | `GLUETUN_SERVICE`       | _(empty)_                     | Compose service to resolve to a container (same project).  |
 | `COMPOSE_PROJECT`       | _(auto)_                      | Compose project for resolution; auto-detected if empty.    |
 | `DOCKER_ACTION`         | `restart`                     | `restart` \| `stop` \| `none`.                             |
 | `PORT_CHECK_RECOVERY`   | `false`                       | Let a sustained closed forwarded port trigger recovery.    |
+| `RECOVERY_HEALTHY_TIMEOUT` | `30`                       | Max seconds to await gluetun healthy before starting the client. |
 | `FAILURE_THRESHOLD`     | `3`                           | Consecutive failed checks before acting.                   |
 | `RESTART_COOLDOWN`      | `300`                         | Minimum seconds between Docker actions.                    |
 | `STARTUP_GRACE`         | `60`                          | Seconds to ignore failures after start / after an action.  |
@@ -212,9 +240,10 @@ The recovery action requires access to the Docker socket, which is a
 **privileged** resource: anything that can talk to it can control the host's
 Docker daemon. To reduce exposure:
 
-- Put a **docker-socket-proxy** in front of the socket, allow only the container
-  `restart`/`stop` calls (plus `GET /containers/json` and `/containers/{id}/json`
-  for `GLUETUN_SERVICE`, and `GET /containers/{id}/archive` for `GLUETUN_PORT_FILE`
+- Put a **docker-socket-proxy** in front of the socket, allow the container
+  `restart`/`stop`/`start` calls (plus `GET /containers/json` and
+  `/containers/{id}/json` for `GLUETUN_SERVICE`/`CLIENT_SERVICE` resolution and
+  container-health, and `GET /containers/{id}/archive` for `GLUETUN_PORT_FILE`
   read via the socket), and point `DOCKER_SOCKET` at the proxy.
 - Or set `DOCKER_ACTION=none` / `ENABLE_DOCKER_ACTION=false` to run in
   observe-and-port-sync mode only, and handle tunnel recovery yourself.

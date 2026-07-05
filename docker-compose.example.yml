@@ -54,6 +54,9 @@ services:
       - GLUETUN_CONTAINER=gluetun              # explicit container to restart on tun loss
       # Or, instead of a fixed name, resolve by compose service (same project):
       # - GLUETUN_SERVICE=gluetun              # project auto-detected from this container
+      # Kill-switch: cycle the torrent client around a gluetun restart
+      # (required for network_mode: service:gluetun clients):
+      # - CLIENT_CONTAINER=qbittorrent
       - CHECK_INTERVAL=30
       - FAILURE_THRESHOLD=3
       - RESTART_COOLDOWN=300
