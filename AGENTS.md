@@ -26,7 +26,7 @@ It ships as the public image **`sat0r/gluetun-watchguard`**.
   or a single flaky probe must never trigger a restart. All recovery is gated by
   `FailureTracker` (`debounce.py`): N consecutive failures **AND** past the
   startup grace window **AND** past the cooldown since the last action. When in
-  doubt, do *not* act.
+  doubt, do _not_ act.
 - **gluetun's public IP is the authoritative tunnel signal.** The torrent
   client's own status is only a cheap first hint. We restart gluetun solely when
   its public IP is gone (tun down) — never merely because a client says
@@ -53,16 +53,16 @@ Docker socket ────────┘                                       
 
 Modules (`src/gluetun_watchguard/`):
 
-| File            | Responsibility                                               |
-|-----------------|--------------------------------------------------------------|
-| `config.py`     | `Config` dataclass; parses & validates env vars              |
-| `log.py`        | stdout logging setup                                          |
-| `gluetun.py`    | gluetun client: `forwarded_port` (API or `GLUETUN_PORT_FILE`), `public_ip` |
-| `connectivity.py`| `OutboundProbe` — egress test via gluetun HTTP proxy, public-IP fallback |
-| `dockerctl.py`  | stdlib socket Docker client (`restart`/`stop`/`start`, resolution, `read_file`, `container_state`) |
-| `debounce.py`   | `FailureTracker` — the anti-flap state machine               |
-| `watchdog.py`   | orchestration loop + health assessment + recovery            |
-| `clients/`      | `TorrentClient` interface + per-client adapters + factory    |
+| File              | Responsibility                                                                                     |
+| ----------------- | -------------------------------------------------------------------------------------------------- |
+| `config.py`       | `Config` dataclass; parses & validates env vars                                                    |
+| `log.py`          | stdout logging setup                                                                               |
+| `gluetun.py`      | gluetun client: `forwarded_port` (API or `GLUETUN_PORT_FILE`), `public_ip`                         |
+| `connectivity.py` | `OutboundProbe` — egress test via gluetun HTTP proxy, public-IP fallback                           |
+| `dockerctl.py`    | stdlib socket Docker client (`restart`/`stop`/`start`, resolution, `read_file`, `container_state`) |
+| `debounce.py`     | `FailureTracker` — the anti-flap state machine                                                     |
+| `watchdog.py`     | orchestration loop + health assessment + recovery                                                  |
+| `clients/`        | `TorrentClient` interface + per-client adapters + factory                                          |
 
 ## Health-assessment logic (keep this exact ordering)
 
@@ -75,7 +75,7 @@ Health = **gluetun has working outbound connectivity**. The same
    (`ENABLE_CONTAINER_HEALTH`) inspects `container_state`: `Running is False` or
    `Health=="unhealthy"` ⇒ `DOWN` immediately — gluetun's own healthcheck failing
    means gluetun says it is not routing, which outranks the client's self-reported
-   status. This runs every tick, *before* the fast-path, so a `unhealthy` gluetun
+   status. This runs every tick, _before_ the fast-path, so a `unhealthy` gluetun
    is acted on even while the client still claims "connected". A container merely
    running with no health verdict stays out of the way (latency ≠ death).
 1. `client.connection_ok()` → `True` ⇒ healthy, stop (cheap fast-path).
@@ -97,7 +97,7 @@ unknown → `None`). A closed port is **always** logged, but only feeds
 port usually means the provider dropped the mapping, not a tun failure.
 
 **Client-readiness gate.** `check_port()` is skipped until the client has been
-*seen up* (`connection_ok() is True`), latched in `_client_seen_up`. This is a
+_seen up_ (`connection_ok() is True`), latched in `_client_seen_up`. This is a
 state latch, **not** a timer: a client still booting (slow disk) briefly reports
 `firewalled`, which must not be mistaken for a closed port. The latch is reset to
 `False` whenever watchguard stops/restarts the client in `_recover()`, so after a
