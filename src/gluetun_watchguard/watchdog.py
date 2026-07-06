@@ -138,12 +138,17 @@ class Watchdog:
         return port
 
     def check_health(self) -> None:
-        state = self.assess_health()
-        if state == HEALTH_UNKNOWN and self._gluetun_is_dead():
-            # Control server & proxy both unreachable AND the container itself is
-            # exited/unhealthy: a real outage, not mere latency.
-            log.warning("gluetun unreachable and its container is exited/unhealthy")
+        reason = "tun interface down"
+        if self._gluetun_is_dead():
+            # Authoritative: gluetun's own container health says exited/unhealthy
+            # (its healthcheck pings the internet through the tunnel). This is a
+            # stronger signal than the client's self-reported status, so it
+            # overrides the fast-path and any egress probe.
+            log.warning("gluetun container reports exited/unhealthy")
             state = HEALTH_DOWN
+            reason = "gluetun container exited/unhealthy"
+        else:
+            state = self.assess_health()
         if state == HEALTH_UP:
             if self.tunnel_tracker.consecutive:
                 log.info("tunnel health recovered")
@@ -164,7 +169,7 @@ class Watchdog:
             self.tunnel_tracker.threshold,
         )
         if self.tunnel_tracker.should_act():
-            self._recover("tun interface down")
+            self._recover(reason)
 
     def check_port(self) -> None:
         """Warn (and optionally recover) when the forwarded port is not open.
@@ -216,9 +221,12 @@ class Watchdog:
     def _gluetun_is_dead(self) -> bool:
         """True only when the gluetun container is definitively bad (exited/unhealthy).
 
-        Escalates an ambiguous UNKNOWN into an actionable DOWN so a hung or
-        crashed gluetun — which never answers the control server or proxy — is
-        still recovered instead of being written off as latency.
+        Consulted first every tick as an authoritative DOWN signal: gluetun's own
+        healthcheck failing means gluetun says it is not routing, so we act even
+        when the torrent client still reports "connected" (a stale/cached status)
+        and even when an egress probe would have been skipped. A container that is
+        merely running with no health verdict stays out of the way, so ordinary
+        latency is never treated as death. Gated by ``ENABLE_CONTAINER_HEALTH``.
         """
         if not self.cfg.enable_container_health:
             return False

@@ -71,6 +71,13 @@ Health = **gluetun has working outbound connectivity**. The same
 (`gluetun-watchguard healthcheck`, exit 0/1), so compose can gate the client with
 `depends_on: { condition: service_healthy }`.
 
+0. **Container health first (authoritative).** `_gluetun_is_dead()`
+   (`ENABLE_CONTAINER_HEALTH`) inspects `container_state`: `Running is False` or
+   `Health=="unhealthy"` ⇒ `DOWN` immediately — gluetun's own healthcheck failing
+   means gluetun says it is not routing, which outranks the client's self-reported
+   status. This runs every tick, *before* the fast-path, so a `unhealthy` gluetun
+   is acted on even while the client still claims "connected". A container merely
+   running with no health verdict stays out of the way (latency ≠ death).
 1. `client.connection_ok()` → `True` ⇒ healthy, stop (cheap fast-path).
 2. Otherwise `OutboundProbe.check()`, which is **tri-state**:
    - proxy request succeeds (`GLUETUN_HTTP_PROXY`) or public IP present ⇒ `UP`.
@@ -133,10 +140,13 @@ parser. This lets port sync run without any control-server auth.
 On success `_mark_recovered()` marks **both** trackers (shared cooldown + re-grace)
 so tunnel and port paths never chain a double restart.
 
-**Escalations:** on `UNKNOWN`, `_gluetun_is_dead()` (`ENABLE_CONTAINER_HEALTH`)
-inspects `container_state` — `Running is False` or `Health=="unhealthy"` promotes
-it to `DOWN`. `HEALTH_REQUIRE_EGRESS` skips the client fast-path so egress is
-always verified.
+**Escalations:** `_gluetun_is_dead()` (`ENABLE_CONTAINER_HEALTH`) inspects
+`container_state` first every tick — `Running is False` or `Health=="unhealthy"`
+is an authoritative `DOWN` that overrides the client fast-path (see the
+Health-assessment ordering above). Still gated by the tracker, so gluetun keeps
+its self-heal window before a container restart. `HEALTH_REQUIRE_EGRESS`
+additionally skips the fast-path so egress is probed even when the container
+reports healthy.
 
 ## Contributing
 

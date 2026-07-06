@@ -64,11 +64,14 @@ never cause a restart.
 When the tunnel is confirmed down (past the anti-flap gate), watchguard restarts
 gluetun. Two refinements:
 
-- **Container-health escalation** (`ENABLE_CONTAINER_HEALTH`, on by default): a
-  fully hung/crashed gluetun answers neither the control server nor the proxy, so
-  health reads *unknown* and would normally be left alone. watchguard then
-  inspects the gluetun container over the socket; if it is **exited** or
-  **`unhealthy`**, the *unknown* is escalated to a real *down* and recovery runs.
+- **Container health is authoritative** (`ENABLE_CONTAINER_HEALTH`, on by
+  default): every tick, watchguard inspects the gluetun container over the socket
+  *before* trusting anything else. If it is **exited** or **`unhealthy`**, that
+  counts as *down* straight away — gluetun's own healthcheck failing means gluetun
+  says it is not routing, which outranks the torrent client's self-reported
+  "connected" status (often stale/cached) and also catches a fully hung gluetun
+  that answers neither the control server nor the proxy. Still gated by the
+  anti-flap tracker, so gluetun keeps its self-heal window before a full restart.
 - **Client cycle / kill-switch** (set `CLIENT_CONTAINER` or `CLIENT_SERVICE`):
   recovery becomes an orchestrated sequence — **stop the torrent client →
   restart gluetun → wait until egress is healthy again (up to
@@ -156,7 +159,7 @@ All configuration is via environment variables.
 | `ENABLE_PORT_SYNC`      | `true`                        | Enable forwarded-port synchronisation.                     |
 | `ENABLE_HEALTHCHECK`    | `true`                        | Enable tunnel health checking.                             |
 | `ENABLE_PORT_CHECK`     | `true`                        | Check whether the forwarded port is actually reachable.    |
-| `ENABLE_CONTAINER_HEALTH` | `true`                      | Escalate an *unknown* to recovery if the gluetun container is exited/unhealthy. |
+| `ENABLE_CONTAINER_HEALTH` | `true`                      | Treat an exited/unhealthy gluetun container as down (authoritative, checked every tick). |
 | `ENABLE_DOCKER_ACTION`  | `true`                        | Allow the recovery action to touch the Docker socket.      |
 | `GLUETUN_CONTROL_URL`   | `http://gluetun:8000`         | gluetun control-server base URL.                           |
 | `GLUETUN_HTTP_PROXY`    | _(empty)_                     | gluetun HTTP proxy (`HTTPPROXY=on`) for the egress probe.  |

@@ -303,7 +303,22 @@ def test_shared_cooldown_prevents_double_restart():
     assert d.restarts == ["gluetun"]
 
 
-# --- G1: container-health escalation on UNKNOWN ---
+# --- G1: container-health is an authoritative DOWN signal ---
+
+
+def test_unhealthy_container_recovers_despite_connected_client():
+    # The exact live scenario: qBittorrent self-reports connected, but gluetun's
+    # own container health is 'unhealthy'. Container health is authoritative and
+    # overrides the client fast-path.
+    cfg = Config(
+        startup_grace=0, failure_threshold=1, restart_cooldown=0, gluetun_container="gluetun"
+    )
+    d = FakeDocker(running=True, health="unhealthy")
+    g = FakeGluetun(ip="1.2.3.4")  # egress would look fine
+    wd = make_watchdog(cfg=cfg, gluetun=g, client=FakeClient(conn=True), docker=d)
+    wd.check_health()
+    assert d.restarts == ["gluetun"]
+    assert g.ip_calls == 0  # never even reached the egress probe
 
 
 def test_unknown_escalates_to_recovery_when_container_exited():
