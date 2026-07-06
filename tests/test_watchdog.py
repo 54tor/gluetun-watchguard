@@ -181,7 +181,7 @@ def test_port_check_warns_but_never_acts_when_recovery_disabled():
         startup_grace=0, failure_threshold=1, restart_cooldown=0, port_check_recovery=False
     )
     d = FakeDocker()
-    wd = make_watchdog(cfg=cfg, client=FakeClient(open=False), docker=d)
+    wd = make_watchdog(cfg=cfg, client=FakeClient(open=False, conn=True), docker=d)
     wd.check_port()
     assert d.restarts == []
 
@@ -195,7 +195,7 @@ def test_port_check_recovers_when_enabled_and_sustained():
         gluetun_container="gluetun",
     )
     d = FakeDocker()
-    wd = make_watchdog(cfg=cfg, client=FakeClient(open=False), docker=d)
+    wd = make_watchdog(cfg=cfg, client=FakeClient(open=False, conn=True), docker=d)
     wd.check_port()  # closed 1/2
     assert d.restarts == []
     wd.check_port()  # closed 2/2 -> act
@@ -205,9 +205,84 @@ def test_port_check_recovers_when_enabled_and_sustained():
 def test_port_check_noop_when_client_cannot_tell():
     cfg = Config(startup_grace=0, failure_threshold=1, restart_cooldown=0, port_check_recovery=True)
     d = FakeDocker()
-    wd = make_watchdog(cfg=cfg, client=FakeClient(open=None), docker=d)
+    wd = make_watchdog(cfg=cfg, client=FakeClient(open=None, conn=True), docker=d)
     wd.check_port()
     assert d.restarts == []
+
+
+# --- Client-readiness gate: only monitor the client's port once it's been up ---
+
+
+def test_port_check_deferred_until_client_seen_up():
+    cfg = Config(
+        startup_grace=0,
+        failure_threshold=1,
+        restart_cooldown=0,
+        port_check_recovery=True,
+        gluetun_container="gluetun",
+    )
+    d = FakeDocker()
+    # Client not up yet (connection_ok is None): its port state is ignored.
+    wd = make_watchdog(cfg=cfg, client=FakeClient(open=False, conn=None), docker=d)
+    for _ in range(3):
+        wd.check_port()
+    assert wd._client_seen_up is False
+    assert d.restarts == []
+    assert wd.port_tracker.consecutive == 0
+
+
+def test_port_check_engages_once_client_is_up():
+    cfg = Config(
+        startup_grace=0,
+        failure_threshold=1,
+        restart_cooldown=0,
+        port_check_recovery=True,
+        gluetun_container="gluetun",
+    )
+    d = FakeDocker()
+    # Client up but firewalled: connection_ok True latches the gate, port closed.
+    wd = make_watchdog(cfg=cfg, client=FakeClient(open=False, conn=True), docker=d)
+    wd.check_port()
+    assert wd._client_seen_up is True
+    assert d.restarts == ["gluetun"]
+
+
+def test_recovery_cycle_resets_client_seen_up():
+    cfg = Config(
+        startup_grace=0,
+        failure_threshold=1,
+        restart_cooldown=0,
+        gluetun_container="gluetun",
+        client_container="qbit",
+        recovery_healthy_timeout=30,
+    )
+    d = FakeDocker()
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip=None), client=FakeClient(conn=False), docker=d
+    )
+    wd._client_seen_up = True
+    wd._clock = lambda: 1000.0
+    wd.check_health()  # tunnel down -> stop client -> gate reset
+    assert wd._client_seen_up is False
+    assert d.stops == ["qbit"]
+
+
+def test_killswitch_stop_resets_client_seen_up():
+    cfg = Config(
+        startup_grace=0,
+        failure_threshold=1,
+        restart_cooldown=0,
+        docker_action="stop",
+        gluetun_container="gluetun",
+        client_container="qbit",
+    )
+    d = FakeDocker()
+    wd = make_watchdog(
+        cfg=cfg, gluetun=FakeGluetun(ip=None), client=FakeClient(conn=False), docker=d
+    )
+    wd._client_seen_up = True
+    wd.check_health()
+    assert wd._client_seen_up is False
 
 
 def test_resolve_target_prefers_explicit_container():
@@ -297,6 +372,7 @@ def test_shared_cooldown_prevents_double_restart():
         client=FakeClient(conn=False, open=False),
         docker=d,
     )
+    wd._client_seen_up = True  # client already observed up in steady state
     wd.check_health()  # tunnel down -> restart
     assert d.restarts == ["gluetun"]
     wd.check_port()  # port closed too, but shared cooldown blocks a second restart

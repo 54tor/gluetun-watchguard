@@ -96,6 +96,12 @@ restart (to re-request a port from the VPN provider) — gated by the same
 anti-flap logic, and sharing the tunnel check's cooldown so the two recovery
 paths never chain into a double restart.
 
+The port check only runs **once the client has been seen up**, and again only
+after it has come back up following any watchguard-initiated restart. A client
+that is still booting (slow disks) briefly reports `firewalled`; this state latch
+(not a timer) makes sure that transient state is never mistaken for a closed port
+during a restart window. Tunnel and container health are monitored regardless.
+
 ### Readiness & container health
 
 The container ships a Docker `HEALTHCHECK`: it is **healthy only when gluetun has

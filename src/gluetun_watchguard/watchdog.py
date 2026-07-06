@@ -50,6 +50,10 @@ class Watchdog:
         # for gluetun to be healthy again before starting it back.
         self._recovery_until: float | None = None
         self._pending_client: str | None = None
+        # The client's port is only monitored once the client has been seen up,
+        # and again after any watchguard-initiated (re)start. This is a state
+        # latch, not a timer, so an arbitrarily slow boot is always covered.
+        self._client_seen_up = False
 
     # --- lifecycle ---
     def run(self) -> None:
@@ -178,6 +182,17 @@ class Watchdog:
         mapping, not that the tunnel is down — so recovery here is opt-in
         (`PORT_CHECK_RECOVERY`) and shares the tunnel's cooldown gate.
         """
+        if not self._client_seen_up:
+            # Only monitor the client's port once it has actually come up. Right
+            # after boot or a watchguard-initiated restart the client is still
+            # starting (slow disks especially) and briefly reports "firewalled";
+            # counting that as a closed port would risk an intempestive restart.
+            if self.client.connection_ok() is True:
+                self._client_seen_up = True
+                log.info("torrent client is up; port monitoring enabled")
+            else:
+                log.debug("torrent client not up yet; deferring port monitoring")
+                return
         is_open = self.client.port_is_open()
         if is_open is None:
             return  # client can't tell; draw no conclusion
@@ -280,6 +295,7 @@ class Watchdog:
             # Kill-switch only: stop the client then gluetun, no restart/wait.
             if client:
                 self.docker.stop(client)
+                self._client_seen_up = False
             if self.docker.stop(gluetun):
                 log.info("recovery: stopped gluetun %r (%s)", gluetun, reason)
                 self._mark_recovered()
@@ -297,6 +313,7 @@ class Watchdog:
                 reason,
             )
             self.docker.stop(client)
+            self._client_seen_up = False
             if self.docker.restart(gluetun):
                 self._pending_client = client
                 self._recovery_until = self._clock() + self.cfg.recovery_healthy_timeout

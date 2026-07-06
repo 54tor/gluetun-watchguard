@@ -96,6 +96,15 @@ unknown → `None`). A closed port is **always** logged, but only feeds
 `port_tracker` and triggers recovery when `PORT_CHECK_RECOVERY` is set — a closed
 port usually means the provider dropped the mapping, not a tun failure.
 
+**Client-readiness gate.** `check_port()` is skipped until the client has been
+*seen up* (`connection_ok() is True`), latched in `_client_seen_up`. This is a
+state latch, **not** a timer: a client still booting (slow disk) briefly reports
+`firewalled`, which must not be mistaken for a closed port. The latch is reset to
+`False` whenever watchguard stops/restarts the client in `_recover()`, so after a
+watchguard-initiated cycle the port is only monitored again once the client has
+come back up — never during its restart window. Tunnel/container health is
+independent of this gate and is always monitored.
+
 `_recover()` is the single choke point for restarts: on success it calls
 `mark_action()` on **both** trackers, so the tunnel and port paths share one
 cooldown and can never chain into a double restart.
