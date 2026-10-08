@@ -137,14 +137,23 @@ parser. This lets port sync run without any control-server auth.
 
 - Targets: `_resolve_target()` (gluetun) and `_resolve_client()` (torrent client)
   each honour an explicit `*_CONTAINER`, then a `*_SERVICE` compose lookup.
+- `_dependents()` = running containers in gluetun's netns
+  (`DockerSocket.dependents`, matched on `HostConfig.NetworkMode`) ∪ the client.
+  They die with gluetun, so they are **always** cycled, configured or not.
 - `DOCKER_ACTION=none`/disabled → log only; unresolved gluetun → abort.
-- **No client** configured → plain gluetun restart.
-- **Client** configured → orchestrated cycle: stop client → restart gluetun → set
-  `_recovery_until`; across ticks `_advance_recovery()` waits for
-  `assess_health()==UP` (then starts the client) or the `RECOVERY_HEALTHY_TIMEOUT`
-  deadline (starts it anyway). While recovering, `tick()` only advances recovery
-  and the loop polls every `_RECOVERY_POLL`s.
-- `DOCKER_ACTION=stop` → kill-switch: stop client then gluetun, no restart/wait.
+- Cycle: stop dependents → restart gluetun → set `_recovery_until`; across ticks
+  `_advance_recovery()` waits for `_gluetun_ready()` (container `healthy`, or
+  egress when gluetun has no healthcheck) or the `RECOVERY_HEALTHY_TIMEOUT`
+  deadline, then starts them. While recovering, `tick()` only advances recovery
+  and the loop polls every `_RECOVERY_POLL`s; after any dependent (re)start it
+  keeps polling fast until the client is seen up (`_settle_until`).
+- `DOCKER_ACTION=stop` → kill-switch: stop dependents then gluetun, no restart.
+- `heal_orphans()` (every tick, docker actions enabled): a running dependent with
+  `StartedAt` older than gluetun's is in a dead netns → restart it, only once
+  gluetun is running and not `starting`/`unhealthy`. Idempotent, no tracker.
+- `DockerSocket._act` keeps the socket open for the stop grace + `http_timeout`,
+  so a slow restart is never misreported as failed (which used to skip the
+  cooldown and restart the client mid-cycle).
 
 On success `_mark_recovered()` marks **both** trackers (shared cooldown + re-grace)
 so tunnel and port paths never chain a double restart.

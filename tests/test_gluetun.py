@@ -35,3 +35,10 @@ def test_parse_forwarded_port_invalid():
     assert parse_forwarded_port("nope") is None
     assert parse_forwarded_port("") is None
     assert parse_forwarded_port("0") is None
+
+
+def test_parse_forwarded_port_takes_first_of_several():
+    from gluetun_watchguard.gluetun import parse_forwarded_port
+
+    assert parse_forwarded_port("51413\n51414") == 51413
+    assert parse_forwarded_port("") is None

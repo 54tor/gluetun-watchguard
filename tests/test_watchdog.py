@@ -44,7 +44,9 @@ class FakeClient:
 
 
 class FakeDocker:
-    def __init__(self, resolved="proj-gluetun-1", file=None, running=True, health=None):
+    def __init__(
+        self, resolved="proj-gluetun-1", file=None, running=True, health=None, deps=(), started=None
+    ):
         self.restarts = []
         self.stops = []
         self.starts = []
@@ -55,6 +57,8 @@ class FakeDocker:
         self.running = running
         self.health = health
         self.state_calls = 0
+        self.deps = list(deps)
+        self.started = started or {}  # container -> started_at
 
     def restart(self, container, **_):
         self.restarts.append(container)
@@ -78,7 +82,13 @@ class FakeDocker:
 
     def container_state(self, container):
         self.state_calls += 1
-        return self.running, self.health
+        return self.running, self.health, self.started.get(container)
+
+    def dependents(self, container):
+        return list(self.deps)
+
+    def inspect(self, container):
+        return {"Id": container}
 
 
 def make_watchdog(cfg=None, gluetun=None, client=None, docker=None):
@@ -92,9 +102,7 @@ def make_watchdog(cfg=None, gluetun=None, client=None, docker=None):
     wd.tunnel_tracker = FailureTracker(
         cfg.failure_threshold, cfg.restart_cooldown, cfg.startup_grace
     )
-    wd.port_tracker = FailureTracker(
-        cfg.failure_threshold, cfg.restart_cooldown, cfg.startup_grace
-    )
+    wd.port_tracker = FailureTracker(cfg.failure_threshold, cfg.restart_cooldown, cfg.startup_grace)
     return wd
 
 
@@ -243,8 +251,8 @@ def test_port_check_engages_once_client_is_up():
     # Client up but firewalled: connection_ok True latches the gate, port closed.
     wd = make_watchdog(cfg=cfg, client=FakeClient(open=False, conn=True), docker=d)
     wd.check_port()
-    assert wd._client_seen_up is True
     assert d.restarts == ["gluetun"]
+    assert wd._client_seen_up is False  # restarting gluetun cuts the client off
 
 
 def test_recovery_cycle_resets_client_seen_up():
@@ -329,6 +337,16 @@ def test_wanted_port_reads_from_container_when_no_volume(tmp_path):
     assert wd._wanted_port() == 48291
     assert d.read_calls == [("gluetun", missing)]
     assert wd.gluetun.port_calls == 0  # socket mode skips the local read entirely
+
+
+def test_wanted_port_falls_back_to_container_when_path_is_a_directory(tmp_path):
+    # Docker creates a directory when a single-file bind source is missing.
+    d_path = tmp_path / "forwarded_port"
+    d_path.mkdir()
+    cfg = Config(gluetun_port_file=str(d_path), gluetun_container="gluetun")
+    d = FakeDocker(file=b"48291\n")
+    wd = make_watchdog(cfg=cfg, gluetun=FakeGluetun(port=None), docker=d)
+    assert wd._wanted_port() == 48291
 
 
 def test_wanted_port_prefers_local_file_over_socket(tmp_path):
@@ -570,3 +588,64 @@ def test_recovery_stop_action_is_killswitch():
     assert d.restarts == []
     assert d.starts == []
     assert wd._recovery_until is None
+
+
+# --- Orphans: dependents left in a dead namespace by a gluetun restart ---
+
+
+def _orphan_wd(health=None, dep_started=100.0):
+    cfg = Config(gluetun_container="gluetun")
+    d = FakeDocker(health=health, deps=["qbit"], started={"gluetun": 200.0, "qbit": dep_started})
+    return make_watchdog(cfg=cfg, docker=d), d
+
+
+def test_heal_orphans_restarts_dependent_older_than_gluetun():
+    wd, d = _orphan_wd()
+    wd._client_seen_up = True
+    wd.heal_orphans()
+    assert d.restarts == ["qbit"]
+    assert wd._client_seen_up is False  # port monitoring re-armed after the restart
+
+
+def test_heal_orphans_leaves_dependent_started_after_gluetun():
+    wd, d = _orphan_wd(dep_started=300.0)
+    wd.heal_orphans()
+    assert d.restarts == []
+
+
+def test_heal_orphans_waits_for_gluetun_to_be_healthy():
+    for health in ("starting", "unhealthy"):
+        wd, d = _orphan_wd(health=health)
+        wd.heal_orphans()
+        assert d.restarts == []
+
+
+def test_recovery_cycles_auto_discovered_dependents():
+    cfg = Config(
+        startup_grace=0, failure_threshold=1, restart_cooldown=0, gluetun_container="gluetun"
+    )
+    d = FakeDocker(deps=["qbit", "webtop"], health="starting")
+    g = FakeGluetun(ip=None)
+    wd = make_watchdog(cfg=cfg, gluetun=g, client=FakeClient(conn=False), docker=d)
+    wd.check_health()  # no CLIENT_* configured: dependents are discovered
+    assert d.stops == ["qbit", "webtop"]
+    assert d.restarts == ["gluetun"]
+    g.ip = "1.2.3.4"
+    wd.tick()  # egress is back but gluetun's own healthcheck still says starting
+    assert d.starts == []
+    d.health = "healthy"
+    wd.tick()
+    assert d.starts == ["qbit", "webtop"]
+    assert wd._fast_poll()  # poll fast until the client answers again
+
+
+def test_sync_port_reports_failure_when_client_ignores_the_value():
+    class Stubborn(FakeClient):
+        def set_listen_port(self, port):
+            self.set_calls.append(port)
+            return True  # accepted, but not applied
+
+    c = Stubborn(port=6881)
+    wd = make_watchdog(gluetun=FakeGluetun(port=55000), client=c)
+    wd.sync_port()
+    assert c.set_calls == [55000] and c.port == 6881

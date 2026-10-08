@@ -12,6 +12,7 @@ import json
 import logging
 import socket
 import tarfile
+from datetime import UTC, datetime
 from urllib.parse import quote
 
 log = logging.getLogger("watchguard.docker")
@@ -37,8 +38,8 @@ class DockerSocket:
         self._socket_path = socket_path
         self._timeout = timeout
 
-    def _request(self, method: str, path: str) -> tuple[int, bytes]:
-        conn = _UnixHTTPConnection(self._socket_path, self._timeout)
+    def _request(self, method: str, path: str, timeout: int | None = None) -> tuple[int, bytes]:
+        conn = _UnixHTTPConnection(self._socket_path, timeout or self._timeout)
         try:
             conn.request(method, path)
             resp = conn.getresponse()
@@ -49,19 +50,22 @@ class DockerSocket:
 
     def restart(self, container: str, *, timeout_seconds: int = 30) -> bool:
         """Restart a container by name or id. Returns True on success."""
-        return self._act(f"/containers/{container}/restart?t={timeout_seconds}")
+        return self._act(f"/containers/{container}/restart?t={timeout_seconds}", timeout_seconds)
 
     def stop(self, container: str, *, timeout_seconds: int = 30) -> bool:
         """Stop a container by name or id. Returns True on success."""
-        return self._act(f"/containers/{container}/stop?t={timeout_seconds}")
+        return self._act(f"/containers/{container}/stop?t={timeout_seconds}", timeout_seconds)
 
     def start(self, container: str) -> bool:
         """Start a container by name or id. Returns True on success."""
         return self._act(f"/containers/{container}/start")
 
-    def _act(self, path: str) -> bool:
+    def _act(self, path: str, grace: int = 0) -> bool:
+        # The daemon only answers once the container is stopped (up to ``grace``
+        # seconds), so the socket must outlive it or a slow-but-successful
+        # restart is misreported as a failure.
         try:
-            status, body = self._request("POST", path)
+            status, body = self._request("POST", path, timeout=grace + self._timeout)
         except OSError as exc:
             log.error("docker socket error on %s: %s", path, exc)
             return False
@@ -143,22 +147,56 @@ class DockerSocket:
             return None
         return _extract_tar_file(body)
 
-    def container_state(self, container: str) -> tuple[bool | None, str | None]:
-        """Return (running, health) from the container's State, or (None, None).
+    def container_state(self, container: str) -> tuple[bool | None, str | None, float | None]:
+        """Return (running, health, started_at) from the container's State.
 
-        ``health`` is "healthy"/"unhealthy"/"starting"/None (no healthcheck).
+        ``health`` is "healthy"/"unhealthy"/"starting"/None (no healthcheck);
+        ``started_at`` is a UNIX timestamp. All None when inspection fails.
         """
         data = self.inspect(container)
         if not data:
-            return None, None
+            return None, None, None
         state = data.get("State") or {}
         running = state.get("Running")
         health = (state.get("Health") or {}).get("Status")
-        return (running if isinstance(running, bool) else None), health
+        started = _parse_time(state.get("StartedAt"))
+        return (running if isinstance(running, bool) else None), health, started
+
+    def dependents(self, container: str) -> list[str]:
+        """Ids of running containers sharing ``container``'s network namespace.
+
+        i.e. started with ``network_mode: service:<it>`` / ``container:<it>``.
+        """
+        data = self.inspect(container)
+        if not data:
+            return []
+        cid = data.get("Id") or ""
+        name = (data.get("Name") or "").lstrip("/")
+        found = []
+        for c in self._get_json("/containers/json") or []:
+            mode = (c.get("HostConfig") or {}).get("NetworkMode") or ""
+            if not mode.startswith("container:"):
+                continue
+            ref = mode.split(":", 1)[1]
+            if ref and (ref == name or cid.startswith(ref)):
+                found.append(c.get("Id"))
+        return [c for c in found if c]
 
 
 def _short(body: bytes, limit: int = 200) -> str:
     return body.decode("utf-8", "replace").strip()[:limit]
+
+
+def _parse_time(value) -> float | None:
+    """Parse Docker's RFC3339Nano timestamps (``0001-...`` = never started)."""
+    if not isinstance(value, str) or value.startswith("0001-"):
+        return None
+    head, _, frac = value.rstrip("Z").partition(".")
+    try:
+        ts = datetime.fromisoformat(head).replace(tzinfo=UTC).timestamp()
+    except ValueError:
+        return None
+    return ts + float(f"0.{frac}") if frac.isdigit() else ts
 
 
 def _extract_tar_file(body: bytes) -> bytes | None:

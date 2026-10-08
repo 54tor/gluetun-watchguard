@@ -119,9 +119,9 @@ def build_gluetun(cfg) -> GluetunControl:
 
 
 def parse_forwarded_port(text: str) -> int | None:
-    """Parse a forwarded-port file/body: a bare port number as text."""
+    """Parse a forwarded-port file/body: one port per line, the first one wins."""
     try:
-        port = int(text.strip())
-    except (ValueError, AttributeError):
+        port = int(text.split()[0])
+    except (ValueError, AttributeError, IndexError):
         return None
     return port if port > 0 else None

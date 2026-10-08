@@ -46,14 +46,19 @@ class Watchdog:
         )
         self._stop = threading.Event()
         self._clock = time.monotonic
-        # When set, we're mid-recovery: the client is stopped and we're waiting
-        # for gluetun to be healthy again before starting it back.
+        # When set, we're mid-recovery: the dependents are stopped and we're
+        # waiting for gluetun to be healthy again before starting them back.
         self._recovery_until: float | None = None
-        self._pending_client: str | None = None
+        self._pending: list[str] = []
         # The client's port is only monitored once the client has been seen up,
         # and again after any watchguard-initiated (re)start. This is a state
         # latch, not a timer, so an arbitrarily slow boot is always covered.
         self._client_seen_up = False
+        # After (re)starting the client, poll fast until it answers so the new
+        # forwarded port is pushed as soon as possible (bounded by this deadline).
+        self._settle_until = 0.0
+        # Last observed client reachability, to log transitions instead of spam.
+        self._client_reachable: bool | None = None
 
     # --- lifecycle ---
     def run(self) -> None:
@@ -75,8 +80,7 @@ class Watchdog:
                 self.tick()
             except Exception:  # never let a transient error kill the loop
                 log.exception("unexpected error during tick")
-            recovering = self._recovery_until is not None
-            self._stop.wait(_RECOVERY_POLL if recovering else self.cfg.check_interval)
+            self._stop.wait(_RECOVERY_POLL if self._fast_poll() else self.cfg.check_interval)
         log.info("stopped")
 
     def _install_signal_handlers(self) -> None:
@@ -86,11 +90,19 @@ class Watchdog:
             except ValueError:  # pragma: no cover - not running on main thread
                 pass
 
+    def _fast_poll(self) -> bool:
+        if self._recovery_until is not None:
+            return True
+        return not self._client_seen_up and self._clock() < self._settle_until
+
     # --- per-tick work ---
     def tick(self) -> None:
         if self._recovery_until is not None:
             self._advance_recovery()
             return
+        if self._docker_enabled():
+            self.heal_orphans()
+        self._observe_client()
         if self.cfg.enable_port_sync:
             self.sync_port()
         if self.cfg.enable_healthcheck:
@@ -104,21 +116,41 @@ class Watchdog:
             log.debug("no forwarded port advertised by gluetun yet")
             return
         current = self.client.get_listen_port()
-        if current is None:
-            log.debug("could not read current port from %s", self.cfg.client_kind)
+        self._note_reachable(current is not None)
+        if current is None or current == wanted:
             return
-        if current == wanted:
-            return
-        if self.client.set_listen_port(wanted):
+        # Read back: some clients accept the call yet silently ignore the value.
+        if self.client.set_listen_port(wanted) and self.client.get_listen_port() == wanted:
             log.info("port synced: %s -> %s", current, wanted)
         else:
             log.warning("failed to set port %s on %s", wanted, self.cfg.client_kind)
+
+    def _note_reachable(self, ok: bool) -> None:
+        if ok == self._client_reachable:
+            return
+        self._client_reachable = ok
+        if ok:
+            log.info("%s API reachable; port sync active", self.cfg.client_kind)
+        else:
+            log.warning(
+                "cannot read the listen port from %s at %s (not started, unreachable, "
+                "or credentials rejected); port sync paused, retrying",
+                self.cfg.client_kind,
+                self.cfg.client_url,
+            )
+
+    def _observe_client(self) -> None:
+        """Latch ``_client_seen_up`` once the client reports itself connected."""
+        if self._client_seen_up or self.client.connection_ok() is not True:
+            return
+        self._client_seen_up = True
+        log.info("torrent client is up; port monitoring enabled")
 
     def _wanted_port(self) -> int | None:
         pf = self.cfg.gluetun_port_file
         if not pf:
             return self.gluetun.forwarded_port()  # control API
-        if os.path.exists(pf):
+        if os.path.isfile(pf):
             return self.gluetun.forwarded_port()  # local file (mounted volume)
         # No volume: read the file straight from the gluetun container over the
         # Docker socket we already hold (avoids a doomed local open + noisy log).
@@ -187,10 +219,8 @@ class Watchdog:
             # after boot or a watchguard-initiated restart the client is still
             # starting (slow disks especially) and briefly reports "firewalled";
             # counting that as a closed port would risk an intempestive restart.
-            if self.client.connection_ok() is True:
-                self._client_seen_up = True
-                log.info("torrent client is up; port monitoring enabled")
-            else:
+            self._observe_client()
+            if not self._client_seen_up:
                 log.debug("torrent client not up yet; deferring port monitoring")
                 return
         is_open = self.client.port_is_open()
@@ -248,8 +278,58 @@ class Watchdog:
         target = self._resolve_target()
         if not target:
             return False
-        running, health = self.docker.container_state(target)
+        running, health, _ = self.docker.container_state(target)
         return running is False or health == "unhealthy"
+
+    def _gluetun_ready(self, target: str) -> bool:
+        """gluetun is back: its own healthcheck says healthy, else egress works."""
+        running, health, _ = self.docker.container_state(target)
+        if health is not None:
+            return running is True and health == "healthy"
+        return self.probe.check() == HEALTH_UP
+
+    def heal_orphans(self) -> None:
+        """Restart dependents left in a dead network namespace by a gluetun restart.
+
+        A ``network_mode: service:gluetun`` container keeps the namespace it
+        joined at start. When gluetun restarts outside our control (crash +
+        restart policy, update, manual restart, gluetun's own healthcheck) that
+        namespace is gone and the client is silently cut off: its API becomes
+        unreachable, so port sync stops forever. A running dependent started
+        *before* gluetun's current start is exactly such an orphan. We wait for
+        gluetun to be running and not starting/unhealthy before touching it, and
+        the fix is idempotent (once restarted it postdates gluetun) — no storm.
+        """
+        gluetun = self._resolve_target()
+        if not gluetun:
+            return
+        running, health, g_started = self.docker.container_state(gluetun)
+        if running is not True or health not in (None, "healthy") or g_started is None:
+            return
+        for dep in self._dependents(gluetun):
+            dep_running, _, started = self.docker.container_state(dep)
+            if dep_running is not True or started is None or started >= g_started:
+                continue
+            log.warning(
+                "%s predates gluetun's last restart (dead network namespace); restarting it",
+                _short_id(dep),
+            )
+            if self.docker.restart(dep):
+                self._client_restarted()
+
+    def _client_restarted(self) -> None:
+        self._client_seen_up = False
+        self._settle_until = self._clock() + self.cfg.recovery_healthy_timeout
+
+    def _dependents(self, gluetun: str) -> list[str]:
+        """Running containers in gluetun's network namespace, plus CLIENT_*."""
+        deps = self.docker.dependents(gluetun)
+        client = self._resolve_client()
+        if client:
+            cid = (self.docker.inspect(client) or {}).get("Id") or client
+            if cid not in deps:
+                deps.append(cid)
+        return deps
 
     def _resolve_target(self) -> str | None:
         """Resolve which container to act on.
@@ -276,12 +356,13 @@ class Watchdog:
             )
         return None
 
+    def _docker_enabled(self) -> bool:
+        return self.cfg.enable_docker_action and self.cfg.docker_action != "none"
+
     def _recover(self, reason: str) -> None:
-        action = self.cfg.docker_action
-        if not self.cfg.enable_docker_action or action == "none":
+        if not self._docker_enabled():
             log.error(
-                "recovery needed (%s) but docker action is disabled "
-                "(manual intervention required)",
+                "recovery needed (%s) but docker action is disabled (manual intervention required)",
                 reason,
             )
             return
@@ -289,13 +370,15 @@ class Watchdog:
         if not gluetun:
             log.error("recovery needed (%s) but gluetun container unresolved", reason)
             return
-        client = self._resolve_client()
+        # Every container sharing gluetun's namespace dies with it, so they are
+        # always cycled around the restart, never left orphaned.
+        deps = self._dependents(gluetun)
+        self._client_seen_up = False
+        for dep in deps:
+            self.docker.stop(dep)
 
-        if action == "stop":
-            # Kill-switch only: stop the client then gluetun, no restart/wait.
-            if client:
-                self.docker.stop(client)
-                self._client_seen_up = False
+        if self.cfg.docker_action == "stop":
+            # Kill-switch only: dependents then gluetun stay down, no restart.
             if self.docker.stop(gluetun):
                 log.info("recovery: stopped gluetun %r (%s)", gluetun, reason)
                 self._mark_recovered()
@@ -303,32 +386,20 @@ class Watchdog:
                 log.error("recovery: failed to stop gluetun %r", gluetun)
             return
 
-        if client:
-            # Orchestrated cycle: stop client -> restart gluetun -> await healthy
-            # -> start client (the wait is handled across ticks).
-            log.warning(
-                "recovery: stop client %r, restart gluetun %r, await healthy (%s)",
-                client,
-                gluetun,
-                reason,
-            )
-            self.docker.stop(client)
-            self._client_seen_up = False
-            if self.docker.restart(gluetun):
-                self._pending_client = client
-                self._recovery_until = self._clock() + self.cfg.recovery_healthy_timeout
-                self._mark_recovered()
-            else:
-                log.error("recovery: gluetun restart failed; starting client %r back", client)
-                self.docker.start(client)
+        log.warning(
+            "recovery (%s): restart gluetun %r, %d dependent(s) stopped until healthy",
+            reason,
+            gluetun,
+            len(deps),
+        )
+        if not self.docker.restart(gluetun):
+            log.error("recovery: gluetun restart failed; starting dependents back")
+            self._start(deps)
             return
-
-        log.warning("recovery: restart gluetun container %r (%s)", gluetun, reason)
-        if self.docker.restart(gluetun):
-            log.info("recovery action succeeded; entering cooldown")
-            self._mark_recovered()
-        else:
-            log.error("recovery action failed; will retry after further failures")
+        self._mark_recovered()
+        if deps:
+            self._pending = deps
+            self._recovery_until = self._clock() + self.cfg.recovery_healthy_timeout
 
     def _mark_recovered(self) -> None:
         # A single restart addresses both failure modes: reset both gates so we
@@ -336,27 +407,28 @@ class Watchdog:
         self.tunnel_tracker.mark_action()
         self.port_tracker.mark_action()
 
-    def _start_client(self) -> None:
-        client, self._pending_client = self._pending_client, None
-        if not client:
-            return
-        if self.docker.start(client):
-            log.info("recovery complete: client %r started", client)
-        else:
-            log.error("recovery: failed to start client %r", client)
+    def _start(self, containers: list[str]) -> None:
+        for c in containers:
+            if self.docker.start(c):
+                log.info("recovery: started %r", _short_id(c))
+            else:
+                log.error("recovery: failed to start %r", _short_id(c))
+        if containers:
+            self._client_restarted()
 
     def _advance_recovery(self) -> None:
-        """Between ticks: wait for gluetun to be healthy, then start the client."""
-        if self.assess_health() == HEALTH_UP:
+        """Between ticks: wait for gluetun to be healthy, then start the dependents."""
+        target = self._resolve_target()
+        if target and self._gluetun_ready(target):
             log.info("gluetun healthy again after recovery")
-            self._recovery_until = None
-            self._start_client()
-        elif self._clock() >= (self._recovery_until or 0):
+        elif self._clock() < (self._recovery_until or 0):
+            log.debug("recovery: awaiting gluetun healthy before starting dependents")
+            return
+        else:
             log.warning(
-                "gluetun not healthy within %ds; starting the client anyway",
+                "gluetun not healthy within %ds; starting dependents anyway",
                 self.cfg.recovery_healthy_timeout,
             )
-            self._recovery_until = None
-            self._start_client()
-        else:
-            log.debug("recovery: awaiting gluetun healthy before starting the client")
+        self._recovery_until = None
+        pending, self._pending = self._pending, []
+        self._start(pending)

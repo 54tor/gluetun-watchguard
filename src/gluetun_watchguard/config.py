@@ -70,7 +70,7 @@ class Config:
     compose_project: str = ""  # compose project for resolution; auto-detected if empty
     docker_action: str = "restart"  # restart | stop | none
     port_check_recovery: bool = False  # let a closed forwarded port trigger recovery
-    recovery_healthy_timeout: int = 30  # max seconds to await gluetun healthy before client start
+    recovery_healthy_timeout: int = 120  # max seconds to await gluetun healthy before client start
 
     # --- Anti-flap / debounce ---
     failure_threshold: int = 3  # consecutive failed checks before acting
@@ -120,7 +120,7 @@ class Config:
             compose_project=_env_str("COMPOSE_PROJECT"),
             docker_action=action,
             port_check_recovery=_env_bool("PORT_CHECK_RECOVERY", False),
-            recovery_healthy_timeout=_env_int("RECOVERY_HEALTHY_TIMEOUT", 30),
+            recovery_healthy_timeout=_env_int("RECOVERY_HEALTHY_TIMEOUT", 120),
             failure_threshold=_env_int("FAILURE_THRESHOLD", 3),
             restart_cooldown=_env_int("RESTART_COOLDOWN", 300),
             startup_grace=_env_int("STARTUP_GRACE", 60),
