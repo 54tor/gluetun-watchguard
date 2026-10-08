@@ -72,15 +72,21 @@ gluetun. Two refinements:
   "connected" status (often stale/cached) and also catches a fully hung gluetun
   that answers neither the control server nor the proxy. Still gated by the
   anti-flap tracker, so gluetun keeps its self-heal window before a full restart.
-- **Client cycle / kill-switch** (set `CLIENT_CONTAINER` or `CLIENT_SERVICE`):
-  recovery becomes an orchestrated sequence — **stop the torrent client →
-  restart gluetun → wait until egress is healthy again (up to
-  `RECOVERY_HEALTHY_TIMEOUT`) → start the client**. This is the correct pattern
-  for clients using `network_mode: "service:gluetun"`, which must be recycled
-  after gluetun restarts, and it doubles as a kill-switch (no torrent traffic
-  while the VPN is down). Without a client configured, recovery is a plain
-  gluetun restart. With `DOCKER_ACTION=stop` it becomes stop-client-then-gluetun
-  (no restart).
+- **Dependent cycle / kill-switch**: every running container sharing gluetun's
+  network namespace (`network_mode: "service:gluetun"`) is discovered
+  automatically, plus `CLIENT_CONTAINER`/`CLIENT_SERVICE` if set. Recovery is an
+  orchestrated sequence — **stop the dependents → restart gluetun → wait until
+  gluetun's own healthcheck reports `healthy` (or, without one, egress works),
+  up to `RECOVERY_HEALTHY_TIMEOUT` → start the dependents**, then poll fast
+  until the client answers so the new forwarded port is pushed right away. It
+  doubles as a kill-switch (no torrent traffic while the VPN is down). With
+  `DOCKER_ACTION=stop` it becomes stop-dependents-then-gluetun (no restart).
+- **Orphan healing**: when gluetun restarts *outside* watchguard (crash + restart
+  policy, image update, manual `docker restart`), its dependents keep a dead
+  network namespace — the client becomes unreachable and port sync silently
+  stops. Any running dependent started *before* gluetun's current start is
+  restarted, once gluetun is running and no longer `starting`/`unhealthy`.
+  Idempotent (a restarted dependent postdates gluetun), so it cannot loop.
 
 Set `HEALTH_REQUIRE_EGRESS=true` to make health *always* verify real egress
 instead of trusting the client's "connected" status.
@@ -129,24 +135,53 @@ You can also run the probe once by hand: `gluetun-watchguard healthcheck`
 ## Quick start (Docker Compose)
 
 A full example lives in [`docker-compose.example.yml`](./docker-compose.example.yml).
-The essentials:
+A minimal, complete stack (gluetun + qBittorrent + watchguard):
 
 ```yaml
 services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    cap_add: [NET_ADMIN]
+    devices: [/dev/net/tun:/dev/net/tun]
+    environment:
+      VPN_SERVICE_PROVIDER: protonvpn
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY}
+      VPN_PORT_FORWARDING: "on"
+      HTTPPROXY: "on"
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    network_mode: "service:gluetun" # discovered and cycled automatically
+    environment:
+      WEBUI_PORT: 8080
+    restart: unless-stopped
+    depends_on:
+      watchguard:
+        condition: service_healthy
+
   watchguard:
     image: sat0r/gluetun-watchguard:latest
-    container_name: gluetun-watchguard
     environment:
-      - TORRENT_CLIENT=qbittorrent
-      - GLUETUN_CONTROL_URL=http://gluetun:8000
-      - CLIENT_URL=http://gluetun:8080
-      - CLIENT_USERNAME=admin
-      - CLIENT_PASSWORD=adminadmin
-      - GLUETUN_CONTAINER=gluetun
+      TORRENT_CLIENT: qbittorrent
+      CLIENT_URL: http://gluetun:8080
+      CLIENT_USERNAME: ${QBT_USER}
+      CLIENT_PASSWORD: ${QBT_PASSWORD}
+      GLUETUN_SERVICE: gluetun
+      # Read gluetun's port file through the Docker socket: no volume and no
+      # control-server auth needed.
+      GLUETUN_PORT_FILE: /tmp/gluetun/forwarded_port
+      GLUETUN_HTTP_PROXY: http://gluetun:8888
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
+    depends_on:
+      gluetun:
+        condition: service_healthy
 ```
+
+Secrets go in a `.env` file next to the compose file, never inline.
 
 When the torrent client uses `network_mode: "service:gluetun"`, its WebUI is
 reachable at gluetun's hostname (`http://gluetun:8080`), which is why
@@ -186,7 +221,7 @@ All configuration is via environment variables.
 | `COMPOSE_PROJECT`       | _(auto)_                      | Compose project for resolution; auto-detected if empty.    |
 | `DOCKER_ACTION`         | `restart`                     | `restart` \| `stop` \| `none`.                             |
 | `PORT_CHECK_RECOVERY`   | `false`                       | Let a sustained closed forwarded port trigger recovery.    |
-| `RECOVERY_HEALTHY_TIMEOUT` | `30`                       | Max seconds to await gluetun healthy before starting the client. |
+| `RECOVERY_HEALTHY_TIMEOUT` | `120`                      | Max seconds to await gluetun healthy before starting the dependents. |
 | `FAILURE_THRESHOLD`     | `3`                           | Consecutive failed checks before acting.                   |
 | `RESTART_COOLDOWN`      | `300`                         | Minimum seconds between Docker actions.                    |
 | `STARTUP_GRACE`         | `60`                          | Seconds to ignore failures after start / after an action.  |
